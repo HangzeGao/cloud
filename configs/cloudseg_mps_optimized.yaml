@@ -9,10 +9,10 @@ model:
   # ------------------ 编码器选择 ------------------
   # 推荐 ConvNeXt 或 EfficientNet，在MPS上效率更高
   encoder:
-    type: "convnext"  # convnext/efficientnet/resnet (swin在MPS上较慢)
+    type: "efficientnet"  # convnext/efficientnet/resnet (swin在MPS上较慢)
     enabled: true
     convnext:
-      model_name: "convnext_tiny"
+      model_name: "efficientnet_b3"
       pretrained: true
       drop_path_rate: 0.1
 
@@ -49,7 +49,7 @@ training:
   # Apple Silicon统一内存架构，但建议batch_size不要太大
   batch_size: 4  # M2建议4-8，根据内存调整
   num_epochs: 15
-  num_workers: 4  # MPS支持多线程数据加载
+  num_workers: 1  # MPS支持多线程数据加载
 
   optimizer:
     type: "AdamW"

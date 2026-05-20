@@ -58,16 +58,6 @@ class SegFormerDecoder(BaseDecoder):
         Returns:
             output: [B, num_classes, H, W]
         """
-        # region agent log: Hypothesis A
-        import json, time
-        log_path = '/Users/hangzegao/PycharmProjects/MyCloudSense/.cursor/debug-f8ba9f.log'
-        c1_shape = features[0].shape
-        try:
-            with open(log_path, 'a') as f:
-                f.write(json.dumps({"sessionId":"f8ba9f","runId":"debug","hypothesisId":"A","location":"segformer_decoder.py:61","message":"Decoder input c1 shape","data":{"c1_shape":list(c1_shape)},"timestamp":int(time.time()*1000)}) + '\n')
-        except: pass
-        # endregion
-
         c1, c2, c3, c4 = features
         
         # 获取目标尺寸（c1的尺寸，即1/4原图）

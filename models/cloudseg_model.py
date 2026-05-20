@@ -141,15 +141,6 @@ class CloudSenseNet(nn.Module):
         
         # 保存输入尺寸用于最终上采样
         input_size = x.shape[-2:]
-
-        # region agent log: Hypothesis B
-        import json, time
-        log_path = '/Users/hangzegao/PycharmProjects/MyCloudSense/.cursor/debug-f8ba9f.log'
-        try:
-            with open(log_path, 'a') as f:
-                f.write(json.dumps({"sessionId":"f8ba9f","runId":"debug","hypothesisId":"B","location":"cloudseg_model.py:145","message":"Model input size","data":{"input_size":list(input_size)},"timestamp":int(time.time()*1000)}) + '\n')
-        except: pass
-        # endregion
         
         # ===== 1. 编码器 =====
         features = self.encoder(x)
@@ -186,17 +177,6 @@ class CloudSenseNet(nn.Module):
         # ===== 5. 解码器 =====
         # 某些decoder可能支持深度监督
         decoder_output = self.decoder(features)
-
-        # region agent log: Hypothesis B
-        if isinstance(decoder_output, tuple):
-            dec_shape = list(decoder_output[0].shape)
-        else:
-            dec_shape = list(decoder_output.shape)
-        try:
-            with open(log_path, 'a') as f:
-                f.write(json.dumps({"sessionId":"f8ba9f","runId":"debug","hypothesisId":"B","location":"cloudseg_model.py:183","message":"Decoder output shape","data":{"decoder_output_shape":dec_shape},"timestamp":int(time.time()*1000)}) + '\n')
-        except: pass
-        # endregion
         
         if isinstance(decoder_output, tuple):
             # 深度监督模式：(main_output, [aux1, aux2, ...])
@@ -226,17 +206,6 @@ class CloudSenseNet(nn.Module):
         Returns:
             loss: 总损失
         """
-        # region agent log: Hypothesis D
-        import json, time
-        log_path = '/Users/hangzegao/PycharmProjects/MyCloudSense/.cursor/debug-f8ba9f.log'
-        logits_shape = list(predictions['logits'].shape)
-        target_shape = list(target.shape)
-        try:
-            with open(log_path, 'a') as f:
-                f.write(json.dumps({"sessionId":"f8ba9f","runId":"debug","hypothesisId":"D","location":"cloudseg_model.py:228","message":"get_loss input shapes","data":{"logits_shape":logits_shape,"target_shape":target_shape},"timestamp":int(time.time()*1000)}) + '\n')
-        except: pass
-        # endregion
-
         loss_config = self.config.get('training', {}).get('loss', {})
         criterion = build_loss(loss_config)
         

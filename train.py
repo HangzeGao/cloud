@@ -133,40 +133,13 @@ def train_epoch(model: nn.Module, train_loader, optimizer, scheduler, epoch: int
     metrics = SegmentationMetrics(num_classes=2)
     
     pbar = tqdm(train_loader, desc=f"Epoch {epoch}")
-
-    # region agent log: Hypothesis C
-    import json, time
-    log_path = '/Users/hangzegao/PycharmProjects/MyCloudSense/.cursor/debug-f8ba9f.log'
-    first_batch = True
-    # endregion
     
     for batch_idx, batch in enumerate(pbar):
         images = batch['image'].to(device)
         masks = batch['mask'].to(device)
-
-        # region agent log: Hypothesis C
-        if first_batch and batch_idx == 0:
-            try:
-                with open(log_path, 'a') as f:
-                    f.write(json.dumps({"sessionId":"f8ba9f","runId":"debug","hypothesisId":"C","location":"train.py:141","message":"Data loader batch shapes","data":{"images_shape":list(images.shape),"masks_shape":list(masks.shape)},"timestamp":int(time.time()*1000)}) + '\n')
-            except: pass
-            first_batch = False
-        # endregion
         
         # 前向传播
         outputs = model(images)
-
-        # region agent log: Hypothesis D
-        if batch_idx == 0:
-            try:
-                if isinstance(outputs, dict):
-                    logits_shape = list(outputs['logits'].shape)
-                else:
-                    logits_shape = list(outputs.shape)
-                with open(log_path, 'a') as f:
-                    f.write(json.dumps({"sessionId":"f8ba9f","runId":"debug","hypothesisId":"D","location":"train.py:153","message":"Model output vs target shapes","data":{"logits_shape":logits_shape,"target_shape":list(masks.shape)},"timestamp":int(time.time()*1000)}) + '\n')
-            except: pass
-        # endregion
         
         # 计算损失
         if isinstance(outputs, dict):
@@ -311,6 +284,8 @@ def main():
                         help='GPU id to use (for CUDA)')
     parser.add_argument('--exp_name', type=str, default=None,
                         help='Experiment name')
+    parser.add_argument('--dev-run', action='store_true',
+                        help='Quick dev run with small dataset subset (20 train, 10 val samples)')
     args = parser.parse_args()
     
     # 加载配置
@@ -335,7 +310,7 @@ def main():
     
     # 获取数据加载器
     print("Loading data...")
-    train_loader, val_loader, _ = get_data_loaders(config)
+    train_loader, val_loader, _ = get_data_loaders(config, dev_run=args.dev_run)
     
     # 创建模型
     print("Creating model...")
