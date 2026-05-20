@@ -1,0 +1,40 @@
+# 方案2: EfficientNet + DeepLabV3+ (速度优先方案)
+model:
+  name: "CloudSenseNet_Efficient_DeepLab"
+  num_classes: 2
+
+  encoder:
+    type: "efficientnet"
+    enabled: true
+    efficientnet:
+      model_name: "efficientnet_b3"
+      pretrained: true
+
+  semantic_enhancement:
+    enabled: false
+
+  fusion:
+    enabled: true
+    type: "aspp"
+    aspp:
+      rates: [6, 12, 18]
+      out_channels: 256
+
+  decoder:
+    type: "deeplabv3plus"
+    enabled: true
+    deeplabv3plus:
+      output_stride: 16
+      decoder_channels: 256
+
+  auxiliary_head:
+    enabled: false
+
+training:
+  batch_size: 16
+  num_epochs: 100
+  optimizer:
+    type: "AdamW"
+    lr: 1e-4
+    weight_decay: 1e-4
+    backbone_lr_mult: 0.1

@@ -1,0 +1,142 @@
+# CloudSense-Net 基础配置文件
+# 所有组件都支持开关控制，可在不同方案间切换
+
+# ==================== 模型架构配置 ====================
+model:
+  name: "CloudSenseNet"
+  num_classes: 2  # 云/背景 二分类
+
+  # ------------------ 编码器选择 ------------------
+  encoder:
+    # 可选: "swin", "convnext", "efficientnet", "resnet"
+    type: "convnext"
+    enabled: true
+    
+    # Swin Transformer 配置
+    swin:
+      model_name: "swin_tiny_patch4_window7_224"
+      pretrained: true
+      drop_path_rate: 0.2
+    
+    # ConvNeXt 配置
+    convnext:
+      model_name: "convnext_tiny"
+      pretrained: true
+      drop_path_rate: 0.1
+    
+    # EfficientNet 配置
+    efficientnet:
+      model_name: "efficientnet_b3"
+      pretrained: true
+    
+    # ResNet 配置
+    resnet:
+      model_name: "resnet50"
+      pretrained: true
+
+  # ------------------ 语义增强模块 (参考SkySense++ MSL) ------------------
+  semantic_enhancement:
+    enabled: false  # 开关：是否启用语义增强
+    vocabulary_size: 2  # 云、背景
+    patch_size: 16
+    embed_dim: 768
+    merge_stage: 0  # 0: 直接融合, 1+: 分层融合
+
+  # ------------------ 特征融合层 ------------------
+  fusion:
+    enabled: true  # 开关：是否启用特征融合
+    # 可选: "fpn", "bifpn", "aspp", "none"
+    type: "fpn"
+    
+    fpn:
+      out_channels: 256
+      num_levels: 4
+    
+    bifpn:
+      out_channels: 256
+      num_iterations: 2
+    
+    aspp:
+      rates: [6, 12, 18]
+      out_channels: 256
+
+  # ------------------ 解码器选择 ------------------
+  decoder:
+    # 可选: "unetpp", "deeplabv3plus", "segformer", "upernet", "simple"
+    type: "segformer"
+    enabled: true
+    
+    unetpp:
+      deep_supervision: true
+      use_cbam: true
+    
+    deeplabv3plus:
+      output_stride: 16
+      decoder_channels: 256
+    
+    segformer:
+      embed_dim: 256
+    
+    upernet:
+      pool_scales: [1, 2, 3, 6]
+      channels: 512
+
+  # ------------------ 辅助头 ------------------
+  auxiliary_head:
+    enabled: false
+    loss_weight: 0.4
+
+# ==================== 训练配置 ====================
+training:
+  batch_size: 8
+  num_epochs: 100
+  num_workers: 4
+  
+  optimizer:
+    type: "AdamW"
+    lr: 1e-4
+    weight_decay: 1e-4
+    
+    # 分层学习率（backbone使用较小lr）
+    backbone_lr_mult: 0.1
+  
+  scheduler:
+    type: "cosine_warmup"  # "cosine", "step", "plateau"
+    warmup_epochs: 5
+    T_0: 10
+    T_mult: 2
+
+  loss:
+    # 可选组合: "dice", "bce", "focal", "boundary", "tversky"
+    types: ["dice", "bce"]
+    weights: [0.5, 0.5]
+    
+  augmentation:
+    enabled: true
+    random_crop_size: [512, 512]
+    horizontal_flip: 0.5
+    vertical_flip: 0.5
+    brightness: 0.2
+    contrast: 0.2
+    gaussian_noise: 0.01
+
+# ==================== 数据配置 ====================
+data:
+  train_data_path: "../Data/RICE2"
+  val_data_path: "../Data/HRC_WHU"
+  test_data_path: "../Data/HRC_WHU"
+  
+  # 任意尺寸推理配置
+  inference:
+    mode: "sliding_window"  # "sliding_window", "whole", "multi_scale"
+    window_size: 512
+    stride: 256
+    scales: [0.5, 1.0, 1.5]  # multi_scale模式使用
+
+# ==================== 其他配置 ====================
+experiment:
+  seed: 42
+  save_dir: "./experiments"
+  log_interval: 10
+  val_interval: 1
+  save_best_only: true

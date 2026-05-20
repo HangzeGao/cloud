@@ -1,0 +1,44 @@
+# 方案3: ConvNeXt + SegFormer (平衡推荐方案)
+model:
+  name: "CloudSenseNet_ConvNeXt_SegFormer"
+  num_classes: 2
+
+  encoder:
+    type: "convnext"
+    enabled: true
+    convnext:
+      model_name: "convnext_tiny"
+      pretrained: true
+      drop_path_rate: 0.1
+
+  semantic_enhancement:
+    enabled: true
+    vocabulary_size: 2
+    patch_size: 16
+    embed_dim: 768
+    merge_stage: 0
+
+  fusion:
+    enabled: true
+    type: "bifpn"
+    bifpn:
+      out_channels: 256
+      num_iterations: 2
+
+  decoder:
+    type: "segformer"
+    enabled: true
+    segformer:
+      embed_dim: 256
+
+  auxiliary_head:
+    enabled: false
+
+training:
+  batch_size: 8
+  num_epochs: 100
+  optimizer:
+    type: "AdamW"
+    lr: 1e-4
+    weight_decay: 1e-4
+    backbone_lr_mult: 0.1

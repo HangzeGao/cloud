@@ -1,0 +1,46 @@
+# 方案1: Swin + UNet++ (高精度方案)
+model:
+  name: "CloudSenseNet_Swin_UNetPP"
+  num_classes: 2
+
+  encoder:
+    type: "swin"
+    enabled: true
+    swin:
+      model_name: "swin_tiny_patch4_window7_224"
+      pretrained: true
+      drop_path_rate: 0.2
+
+  semantic_enhancement:
+    enabled: true
+    vocabulary_size: 2
+    patch_size: 4  # Swin使用4x4 patch
+    embed_dim: 768
+    merge_stage: 1
+
+  fusion:
+    enabled: true
+    type: "fpn"
+    fpn:
+      out_channels: 256
+      num_levels: 4
+
+  decoder:
+    type: "unetpp"
+    enabled: true
+    unetpp:
+      deep_supervision: true
+      use_cbam: true
+
+  auxiliary_head:
+    enabled: true
+    loss_weight: 0.4
+
+training:
+  batch_size: 4  # Swin显存占用较大
+  num_epochs: 100
+  optimizer:
+    type: "AdamW"
+    lr: 5e-5
+    weight_decay: 1e-4
+    backbone_lr_mult: 0.1

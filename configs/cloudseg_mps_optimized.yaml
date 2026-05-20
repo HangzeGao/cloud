@@ -1,0 +1,109 @@
+# CloudSense-Net Apple MPS (Metal Performance Shaders) 优化配置
+# 专为 Apple Silicon (M1/M2/M3) 优化的配置
+
+# ==================== 模型架构配置 ====================
+model:
+  name: "CloudSenseNet_MPS"
+  num_classes: 2
+
+  # ------------------ 编码器选择 ------------------
+  # 推荐 ConvNeXt 或 EfficientNet，在MPS上效率更高
+  encoder:
+    type: "convnext"  # convnext/efficientnet/resnet (swin在MPS上较慢)
+    enabled: true
+    convnext:
+      model_name: "convnext_tiny"
+      pretrained: true
+      drop_path_rate: 0.1
+
+  # ------------------ 语义增强模块 ------------------
+  semantic_enhancement:
+    enabled: true
+    vocabulary_size: 2
+    patch_size: 16
+    embed_dim: 768
+    merge_stage: 0
+
+  # ------------------ 特征融合层 ------------------
+  fusion:
+    enabled: true
+    type: "fpn"  # FPN在MPS上效率较好
+    fpn:
+      out_channels: 256
+      num_levels: 4
+
+  # ------------------ 解码器选择 ------------------
+  decoder:
+    type: "segformer"  # SegFormer轻量高效，适合MPS
+    enabled: true
+    segformer:
+      embed_dim: 256
+
+  # ------------------ 辅助头 ------------------
+  auxiliary_head:
+    enabled: false  # MPS显存有限，建议禁用
+    loss_weight: 0.4
+
+# ==================== MPS优化训练配置 ====================
+training:
+  # Apple Silicon统一内存架构，但建议batch_size不要太大
+  batch_size: 4  # M2建议4-8，根据内存调整
+  num_epochs: 15
+  num_workers: 4  # MPS支持多线程数据加载
+
+  optimizer:
+    type: "AdamW"
+    lr: 1e-4
+    weight_decay: 1e-4
+    backbone_lr_mult: 0.1
+
+  scheduler:
+    type: "cosine_warmup"
+    warmup_epochs: 5
+    T_0: 10
+    T_mult: 2
+
+  loss:
+    types: ["dice", "bce"]
+    weights: [0.5, 0.5]
+
+  augmentation:
+    enabled: true
+    random_crop_size: [512, 512]
+    horizontal_flip: 0.5
+    vertical_flip: 0.5
+    brightness: 0.2
+    contrast: 0.2
+    gaussian_noise: 0.01
+
+# ==================== 数据配置 ====================
+data:
+  train_data_path: "../Data/RICE2"
+  val_data_path: "../Data/HRC_WHU"
+  test_data_path: "../Data/HRC_WHU"
+
+  inference:
+    mode: "sliding_window"
+    window_size: 512
+    stride: 256
+    scales: [0.5, 1.0, 1.5]
+
+# ==================== 其他配置 ====================
+experiment:
+  seed: 42
+  save_dir: "./experiments"
+  log_interval: 10
+  val_interval: 1
+  save_best_only: true
+
+# ==================== MPS特定提示 ====================
+# 使用说明:
+# 1. 训练: python3 train.py --config configs/cloudseg_mps_optimized.yaml --device mps
+# 2. 评估: python3 eval.py --checkpoint experiments_mps/best_model.pth --device mps ...
+# 3. 推理: python3 inference.py --checkpoint experiments_mps/best_model.pth --device mps ...
+#
+# MPS优化建议:
+# - 使用 --device auto 自动检测MPS
+# - batch_size根据Mac内存调整: M2(8GB)->4, M2 Pro(16GB)->8, M2 Max(32GB)->16
+# - 避免使用Swin Transformer（在MPS上性能不佳）
+# - 推荐使用ConvNeXt或EfficientNet
