@@ -339,7 +339,7 @@ class CloudAugmentation:
 
 def get_data_loaders(config: dict, dev_run: bool = False):
     """
-    创建数据加载器 (支持 RGB+NIR 四通道)
+    创建数据加载器 (支持 RGB+NIR 四通道和原生 4 通道高比特数据集)
     
     Args:
         config: 配置字典
@@ -351,6 +351,10 @@ def get_data_loaders(config: dict, dev_run: bool = False):
     data_cfg = config['data']
     train_cfg = config['training']
     
+    # 检测数据集类型
+    dataset_type = data_cfg.get('dataset_type', 'standard')
+    use_native_4ch = data_cfg.get('native_4channel', False)
+    
     # NIR 配置
     use_nir = data_cfg.get('use_nir', True)
     nir_method = data_cfg.get('nir_method', 'physical')
@@ -359,45 +363,72 @@ def get_data_loaders(config: dict, dev_run: bool = False):
     if use_nir:
         print(f"[DataLoader] NIR enabled: method={nir_method}, gain={nir_gain}")
     
-    # 数据增强配置（传递 NIR 参数）
+    # 数据增强配置
     aug_config = train_cfg.get('augmentation', {'enabled': False})
     aug_config['use_nir'] = use_nir
     aug_config['nir_method'] = nir_method
     aug_config['nir_gain'] = nir_gain
     transform = CloudAugmentation(aug_config)
     
-    # 训练集
-    train_dataset = CloudSegmentationDataset(
-        image_dir=os.path.join(data_cfg['train_data_path'], 'images'),
-        mask_dir=os.path.join(data_cfg['train_data_path'], 'masks'),
-        mode='train',
-        transform=transform,
-        use_nir=use_nir,
-        nir_method=nir_method,
-        nir_gain=nir_gain
-    )
-    
-    # 验证集
-    val_dataset = CloudSegmentationDataset(
-        image_dir=os.path.join(data_cfg['val_data_path'], 'images'),
-        mask_dir=os.path.join(data_cfg['val_data_path'], 'masks'),
-        mode='val',
-        transform=transform,
-        use_nir=use_nir,
-        nir_method=nir_method,
-        nir_gain=nir_gain
-    )
-    
-    # 测试集
-    test_dataset = CloudSegmentationDataset(
-        image_dir=os.path.join(data_cfg['test_data_path'], 'images'),
-        mask_dir=os.path.join(data_cfg['test_data_path'], 'masks'),
-        mode='test',
-        transform=transform,
-        use_nir=use_nir,
-        nir_method=nir_method,
-        nir_gain=nir_gain
-    )
+    # 根据数据集类型创建数据集
+    if dataset_type == 'cloud_cover' or use_native_4ch:
+        # 原生 4 通道高比特数据集
+        print(f"[DataLoader] Using native 4-channel dataset: {dataset_type}")
+        
+        train_dataset = CloudCoverDataset(
+            data_root=data_cfg['train_data_path'],
+            split='train',
+            transform=transform,
+            bit_depth=data_cfg.get('bit_depth', None),
+            use_all_bands=data_cfg.get('use_all_bands', True)
+        )
+        
+        val_dataset = CloudCoverDataset(
+            data_root=data_cfg['val_data_path'],
+            split='val',
+            transform=transform,
+            bit_depth=data_cfg.get('bit_depth', None),
+            use_all_bands=data_cfg.get('use_all_bands', True)
+        )
+        
+        test_dataset = CloudCoverDataset(
+            data_root=data_cfg['test_data_path'],
+            split='test',
+            transform=transform,
+            bit_depth=data_cfg.get('bit_depth', None),
+            use_all_bands=data_cfg.get('use_all_bands', True)
+        )
+    else:
+        # 标准 3 通道数据集（RGB+NIR 生成）
+        train_dataset = CloudSegmentationDataset(
+            image_dir=os.path.join(data_cfg['train_data_path'], 'images'),
+            mask_dir=os.path.join(data_cfg['train_data_path'], 'masks'),
+            mode='train',
+            transform=transform,
+            use_nir=use_nir,
+            nir_method=nir_method,
+            nir_gain=nir_gain
+        )
+        
+        val_dataset = CloudSegmentationDataset(
+            image_dir=os.path.join(data_cfg['val_data_path'], 'images'),
+            mask_dir=os.path.join(data_cfg['val_data_path'], 'masks'),
+            mode='val',
+            transform=transform,
+            use_nir=use_nir,
+            nir_method=nir_method,
+            nir_gain=nir_gain
+        )
+        
+        test_dataset = CloudSegmentationDataset(
+            image_dir=os.path.join(data_cfg['test_data_path'], 'images'),
+            mask_dir=os.path.join(data_cfg['test_data_path'], 'masks'),
+            mode='test',
+            transform=transform,
+            use_nir=use_nir,
+            nir_method=nir_method,
+            nir_gain=nir_gain
+        )
     
     # Dev run: limit dataset size for quick testing
     if dev_run:
@@ -488,4 +519,398 @@ class InferenceDataset(Dataset):
             'image': image,
             'filename': os.path.basename(img_path),
             'original_size': original_size
+        }
+
+
+class CloudCoverDataset(Dataset):
+    """
+    原生 4 通道 (RGB+NIR) 高比特位宽云分割数据集
+    
+    专为 cloud_cover_detection 数据集设计:
+    - 支持 4 通道原生图像 (R, G, B, NIR)
+    - 支持 16-bit/32-bit 高比特位宽
+    - 自动归一化到 [0, 1] 范围
+    - 支持 TIFF/PNG 等格式
+    
+    数据集结构:
+    cloud_cover_detection/
+    ├── train/
+    │   ├── images/     # 4通道高比特图像
+    │   └── masks/      # 单通道标注
+    ├── val/
+    └── test/
+    
+    Args:
+        data_root: 数据集根目录 (如 '../Data/cloud_cover_detection')
+        split: 'train', 'val', 或 'test'
+        transform: 数据增强变换
+        target_size: 目标尺寸
+        bit_depth: 输入图像位深 (16, 32, None=自动检测)
+        use_all_bands: 是否使用所有4通道 (False则只用RGB)
+    """
+    
+    def __init__(
+        self,
+        data_root: str,
+        split: str = 'train',
+        transform=None,
+        target_size: tuple = (512, 512),
+        bit_depth: int = None,
+        use_all_bands: bool = True
+    ):
+        self.data_root = data_root
+        self.split = split
+        self.transform = transform
+        self.target_size = target_size
+        self.bit_depth = bit_depth
+        self.use_all_bands = use_all_bands
+        
+        # 图像和标注目录
+        self.image_dir = os.path.join(data_root, split, 'images')
+        self.mask_dir = os.path.join(data_root, split, 'masks')
+        
+        # 获取图像列表
+        self.image_paths = []
+        for ext in ['*.tif', '*.tiff', '*.png', '*.jpg']:
+            self.image_paths.extend(glob.glob(os.path.join(self.image_dir, ext)))
+        self.image_paths.sort()
+        
+        # 验证 mask 存在性
+        self.valid_indices = []
+        for i, img_path in enumerate(self.image_paths):
+            img_name = os.path.basename(img_path)
+            name_wo_ext = os.path.splitext(img_name)[0]
+            
+            mask_candidates = [
+                os.path.join(self.mask_dir, img_name),
+                os.path.join(self.mask_dir, name_wo_ext + '.png'),
+                os.path.join(self.mask_dir, name_wo_ext + '.tif'),
+            ]
+            
+            if any(os.path.exists(m) for m in mask_candidates):
+                self.valid_indices.append(i)
+        
+        self.image_paths = [self.image_paths[i] for i in self.valid_indices]
+        
+        print(f"[CloudCoverDataset] {split}: {len(self.image_paths)} valid samples")
+        if use_all_bands:
+            print(f"[CloudCoverDataset] Using 4 channels (R+G+B+NIR)")
+        else:
+            print(f"[CloudCoverDataset] Using 3 channels (R+G+B), skipping native NIR")
+    
+    def __len__(self):
+        return len(self.image_paths)
+    
+    def _load_multichannel_image(self, path: str) -> np.ndarray:
+        """
+        加载多通道高比特位宽图像
+        
+        Returns:
+            image: [H, W, C] numpy array, float32 in [0, 1]
+        """
+        # 使用 imageio 或 tifffile 加载高比特图像
+        try:
+            import tifffile
+            img = tifffile.imread(path)
+        except ImportError:
+            # 降级使用 PIL
+            img = np.array(Image.open(path))
+        
+        # 处理不同维度格式
+        if img.ndim == 2:
+            # 单通道，复制为4通道
+            img = np.stack([img] * 4, axis=-1)
+        elif img.ndim == 3:
+            if img.shape[0] <= 4 and img.shape[0] < img.shape[-1]:
+                # [C, H, W] 格式，转为 [H, W, C]
+                img = np.transpose(img, (1, 2, 0))
+        
+        # 确保至少3通道
+        if img.shape[-1] < 3:
+            if img.shape[-1] == 1:
+                img = np.repeat(img, 3, axis=-1)
+        
+        # 检测位深并归一化
+        if self.bit_depth is not None:
+            max_val = (1 << self.bit_depth) - 1
+        else:
+            # 自动检测
+            if img.dtype == np.uint8:
+                max_val = 255
+            elif img.dtype == np.uint16:
+                max_val = 65535
+            elif img.dtype == np.float32 or img.dtype == np.float64:
+                max_val = 1.0
+                if img.max() > 1:
+                    max_val = img.max()
+            else:
+                max_val = img.max()
+        
+        # 归一化到 [0, 1]
+        img = img.astype(np.float32) / max_val
+        
+        # 确保4通道 (RGB+NIR)
+        if self.use_all_bands and img.shape[-1] >= 4:
+            img = img[:, :, :4]  # 取前4通道
+        elif self.use_all_bands and img.shape[-1] == 3:
+            # 只有3通道，需要生成NIR
+            print(f"Warning: {path} has only 3 channels, generating pseudo-NIR")
+            nir = 0.7 * img[:, :, 0] + 0.25 * img[:, :, 1] + 0.05 * img[:, :, 2]
+            nir = nir[:, :, np.newaxis]
+            img = np.concatenate([img, nir], axis=-1)
+        else:
+            # 只使用RGB
+            img = img[:, :, :3]
+        
+        return img
+    
+    def __getitem__(self, idx):
+        img_path = self.image_paths[idx]
+        img_name = os.path.basename(img_path)
+        name_wo_ext = os.path.splitext(img_name)[0]
+        
+        # 加载多通道图像 [H, W, C]
+        image_np = self._load_multichannel_image(img_path)
+        
+        # 加载 mask
+        mask_candidates = [
+            os.path.join(self.mask_dir, img_name),
+            os.path.join(self.mask_dir, name_wo_ext + '.png'),
+            os.path.join(self.mask_dir, name_wo_ext + '.tif'),
+        ]
+        
+        mask = None
+        for mask_path in mask_candidates:
+            if os.path.exists(mask_path):
+                mask = Image.open(mask_path).convert('L')
+                break
+        
+        if mask is None:
+            raise FileNotFoundError(f"Mask not found for {img_path}")
+        
+        # 二值化 mask
+        mask_np = np.array(mask)
+        mask_np = (mask_np > 127).astype(np.uint8)
+        
+        # 转为 PIL Image 以使用 transforms
+        image_pil = Image.fromarray((image_np[:, :, :3] * 255).astype(np.uint8))
+        mask_pil = Image.fromarray(mask_np)
+        
+        # 数据增强
+        if self.transform is not None:
+            # 注意：transform 返回的是 [C, H, W] tensor
+            if self.use_all_bands and image_np.shape[-1] == 4:
+                # 4通道情况：先转换RGB，然后合并原生NIR
+                image_rgb_pil = Image.fromarray((image_np[:, :, :3] * 255).astype(np.uint8))
+                image_tensor, mask_tensor = self.transform(image_rgb_pil, mask_pil, self.split)
+                
+                # 如果 transform 只返回了3通道，我们需要添加原生NIR
+                if image_tensor.shape[0] == 3:
+                    # 加载原生NIR通道
+                    nir_native = torch.from_numpy(image_np[:, :, 3]).float()
+                    nir_native = TF.resize(nir_native.unsqueeze(0), self.target_size)
+                    image_tensor = torch.cat([image_tensor, nir_native], dim=0)
+            else:
+                # 3通道情况
+                image_tensor, mask_tensor = self.transform(image_pil, mask_pil, self.split)
+        else:
+            # 默认变换
+            image_pil = image_pil.resize(self.target_size)
+            mask_pil = mask_pil.resize(self.target_size, Image.NEAREST)
+            
+            image_tensor = T.ToTensor()(image_pil)  # [3, H, W]
+            
+            # 添加原生NIR（如果是4通道模式）
+            if self.use_all_bands and image_np.shape[-1] == 4:
+                nir_resized = TF.resize(
+                    Image.fromarray((image_np[:, :, 3] * 255).astype(np.uint8)),
+                    self.target_size
+                )
+                nir_tensor = T.ToTensor()(nir_resized)  # [1, H, W]
+                image_tensor = torch.cat([image_tensor, nir_tensor], dim=0)
+            
+            mask_tensor = torch.from_numpy(np.array(mask_pil)).long()
+        
+        return {
+            'image': image_tensor,
+            'mask': mask_tensor,
+            'filename': img_name,
+            'native_nir': self.use_all_bands and image_np.shape[-1] == 4
+        }
+
+
+class MultiDatasetSampler:
+    """
+    多数据集采样器 - 用于快速验证模型在不同数据集的效果
+    
+    从多个数据集中分别采样固定数量的样本，组合成一个验证集
+    
+    Example:
+        sampler = MultiDatasetSampler({
+            'RICE2': '../Data/RICE2',
+            'HRC_WHU': '../Data/HRC_WHU', 
+            'cloud_cover': '../Data/cloud_cover_detection'
+        }, samples_per_dataset=20)
+        
+        val_loader = sampler.get_validation_loader(batch_size=4)
+    """
+    
+    def __init__(
+        self,
+        dataset_paths: dict,
+        samples_per_dataset: int = 20,
+        target_size: tuple = (512, 512),
+        use_nir: bool = True,
+        transform=None
+    ):
+        """
+        Args:
+            dataset_paths: 字典，{数据集名称: 路径}
+            samples_per_dataset: 每个数据集采样的样本数
+            target_size: 目标尺寸
+            use_nir: 是否使用NIR
+            transform: 数据增强
+        """
+        self.dataset_paths = dataset_paths
+        self.samples_per_dataset = samples_per_dataset
+        self.target_size = target_size
+        self.use_nir = use_nir
+        self.transform = transform
+        
+        self.samples = []  # [(dataset_name, image_path, mask_path), ...]
+        
+        for dataset_name, path in dataset_paths.items():
+            sampled = self._sample_dataset(dataset_name, path)
+            self.samples.extend(sampled)
+            print(f"[MultiDatasetSampler] {dataset_name}: sampled {len(sampled)} images")
+        
+        print(f"[MultiDatasetSampler] Total: {len(self.samples)} samples")
+    
+    def _sample_dataset(self, name: str, path: str):
+        """从单个数据集采样"""
+        samples = []
+        
+        # 尝试不同的目录结构
+        possible_dirs = [
+            (os.path.join(path, 'val', 'images'), os.path.join(path, 'val', 'masks')),
+            (os.path.join(path, 'test', 'images'), os.path.join(path, 'test', 'masks')),
+            (os.path.join(path, 'images'), os.path.join(path, 'masks')),
+        ]
+        
+        image_dir = None
+        mask_dir = None
+        
+        for img_dir, msk_dir in possible_dirs:
+            if os.path.exists(img_dir) and os.path.exists(msk_dir):
+                image_dir = img_dir
+                mask_dir = msk_dir
+                break
+        
+        if image_dir is None:
+            print(f"Warning: Could not find valid image/mask dirs for {name}")
+            return []
+        
+        # 获取所有图像
+        image_paths = []
+        for ext in ['*.jpg', '*.png', '*.tif', '*.tiff']:
+            image_paths.extend(glob.glob(os.path.join(image_dir, ext)))
+        
+        image_paths.sort()
+        
+        # 验证并收集有效样本
+        for img_path in image_paths:
+            img_name = os.path.basename(img_path)
+            name_wo_ext = os.path.splitext(img_name)[0]
+            
+            mask_candidates = [
+                os.path.join(mask_dir, img_name),
+                os.path.join(mask_dir, name_wo_ext + '.png'),
+                os.path.join(mask_dir, name_wo_ext + '.jpg'),
+                os.path.join(mask_dir, name_wo_ext + '.tif'),
+            ]
+            
+            for mask_path in mask_candidates:
+                if os.path.exists(mask_path):
+                    samples.append((name, img_path, mask_path))
+                    break
+        
+        # 随机采样
+        if len(samples) > self.samples_per_dataset:
+            import random
+            samples = random.sample(samples, self.samples_per_dataset)
+        
+        return samples
+    
+    def get_validation_loader(self, batch_size: int = 4, num_workers: int = 2):
+        """
+        获取验证数据加载器
+        
+        Returns:
+            DataLoader that yields batches with 'dataset' key indicating source
+        """
+        dataset = MultiDatasetValidationSet(
+            self.samples,
+            target_size=self.target_size,
+            use_nir=self.use_nir,
+            transform=self.transform
+        )
+        
+        loader = DataLoader(
+            dataset,
+            batch_size=batch_size,
+            shuffle=False,
+            num_workers=num_workers,
+            pin_memory=True
+        )
+        
+        return loader
+
+
+class MultiDatasetValidationSet(Dataset):
+    """内部类：多数据集验证集"""
+    
+    def __init__(self, samples, target_size, use_nir, transform):
+        self.samples = samples
+        self.target_size = target_size
+        self.use_nir = use_nir
+        self.transform = transform
+        
+        if use_nir:
+            self.nir_generator = NIRGenerator()
+        else:
+            self.nir_generator = None
+    
+    def __len__(self):
+        return len(self.samples)
+    
+    def __getitem__(self, idx):
+        dataset_name, img_path, mask_path = self.samples[idx]
+        
+        # 加载图像
+        image = Image.open(img_path).convert('RGB')
+        
+        # 加载 mask
+        mask = Image.open(mask_path).convert('L')
+        mask_np = np.array(mask)
+        mask_np = (mask_np > 127).astype(np.uint8)
+        mask = Image.fromarray(mask_np)
+        
+        # 数据增强
+        if self.transform is not None:
+            image, mask = self.transform(image, mask, 'val')
+        else:
+            image = image.resize(self.target_size)
+            mask = mask.resize(self.target_size, Image.NEAREST)
+            image = T.ToTensor()(image)
+            mask = torch.from_numpy(np.array(mask)).long()
+            
+            if self.use_nir and self.nir_generator is not None:
+                nir = self.nir_generator(image)
+                image = torch.cat([image, nir], dim=0)
+        
+        return {
+            'image': image,
+            'mask': mask,
+            'filename': os.path.basename(img_path),
+            'dataset': dataset_name  # 标识数据来源
         }

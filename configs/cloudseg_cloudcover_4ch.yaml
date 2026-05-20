@@ -1,0 +1,109 @@
+# CloudSense-Net 配置：原生 4 通道 (RGB+NIR) 高比特位宽数据集
+# 专为 cloud_cover_detection 数据集设计
+
+# ==================== 模型架构配置 ====================
+model:
+  name: "CloudSenseNet-4CH"
+  num_classes: 2
+
+  encoder:
+    type: "efficientnet"
+    enabled: true
+    efficientnet:
+      model_name: "efficientnet_b3"
+      pretrained: true  # 预训练权重通常是3通道，但会自动适应
+
+  semantic_enhancement:
+    enabled: false
+
+  fusion:
+    enabled: true
+    type: "fpn"
+    fpn:
+      out_channels: 256
+      num_levels: 4
+
+  decoder:
+    type: "segformer"
+    enabled: true
+    segformer:
+      embed_dim: 256
+
+  auxiliary_head:
+    enabled: false
+
+# ==================== 训练配置 ====================
+training:
+  batch_size: 4  # 4通道占用更多显存，建议减小
+  num_epochs: 100
+  num_workers: 4
+  
+  optimizer:
+    type: "AdamW"
+    lr: 1e-4
+    weight_decay: 1e-4
+    backbone_lr_mult: 0.1
+  
+  scheduler:
+    type: "cosine_warmup"
+    warmup_epochs: 5
+    T_0: 10
+    T_mult: 2
+
+  loss:
+    types: ["dice", "bce"]
+    weights: [0.5, 0.5]
+    
+  augmentation:
+    enabled: true
+    random_crop_size: [512, 512]
+    horizontal_flip: 0.5
+    vertical_flip: 0.5
+    brightness: 0.2
+    contrast: 0.2
+    gaussian_noise: 0.01
+    # 注意：原生4通道数据集使用数据集中的NIR，不通过生成算法
+    use_nir: true
+    nir_method: "native"  # 特殊标记，表示使用原生NIR而非生成
+
+# ==================== 数据配置 (cloud_cover_detection) ====================
+data:
+  # 原生4通道数据集路径
+  dataset_type: "cloud_cover"  # 标记数据集类型
+  
+  train_data_path: "../Data/cloud_cover_detection/train"
+  val_data_path: "../Data/cloud_cover_detection/val"
+  test_data_path: "../Data/cloud_cover_detection/test"
+  
+  # 原生4通道配置
+  native_4channel: true        # 标记使用原生4通道
+  bit_depth: 16               # 输入图像位深 (16, 32, None=自动检测)
+  use_all_bands: true         # 使用所有4通道 (R+G+B+NIR)
+  
+  # NIR 配置 (虽然使用原生NIR，但仍保留配置项用于兼容)
+  use_nir: true               # 保持与模型输入一致
+  nir_method: "native"        # 原生NIR，不通过算法生成
+  nir_gain: 1.0              # 原生数据不需要增益
+  
+  inference:
+    mode: "sliding_window"
+    window_size: 512
+    stride: 256
+
+# ==================== 多数据集验证配置 ====================
+multi_dataset_eval:
+  enabled: false              # 是否启用多数据集采样验证
+  datasets:
+    RICE2: "../Data/RICE2"
+    HRC_WHU: "../Data/HRC_WHU"
+    cloud_cover: "../Data/cloud_cover_detection"
+  samples_per_dataset: 20     # 每个数据集采样20张
+  eval_batch_size: 4
+
+# ==================== 其他配置 ====================
+experiment:
+  seed: 42
+  save_dir: "./experiments_cloudcover"
+  log_interval: 10
+  val_interval: 1
+  save_best_only: true
