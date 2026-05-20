@@ -5,7 +5,9 @@ from .cloud_dataset import (
     CloudAugmentation,
     InferenceDataset,
     CloudCoverDataset,
-    MultiDatasetSampler
+    MultiDatasetSampler,
+    UnifiedDataset,
+    create_mixed_dataloaders
 )
 
 __all__ = [
@@ -15,5 +17,7 @@ __all__ = [
     'CloudAugmentation',
     'InferenceDataset',
     'CloudCoverDataset',
-    'MultiDatasetSampler'
+    'MultiDatasetSampler',
+    'UnifiedDataset',
+    'create_mixed_dataloaders'
 ]

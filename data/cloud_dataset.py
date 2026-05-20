@@ -914,3 +914,421 @@ class MultiDatasetValidationSet(Dataset):
             'filename': os.path.basename(img_path),
             'dataset': dataset_name  # 标识数据来源
         }
+
+
+class UnifiedDataset(Dataset):
+    """
+    统一数据集 - 支持多数据集混合训练，自动统一通道和位宽
+    
+    功能:
+    - 混合多个数据集（均作为训练集）
+    - 自动统一通道数（目标：4通道 RGB+NIR）
+    - 自动统一位宽（目标：16bit）
+    - 支持 val/test 从训练集采样
+    
+    数据统一处理:
+    1. 通道统一：
+       - 3通道数据：通过 NIR 生成算法添加第4通道
+       - 4通道数据：保留原生 NIR
+    
+    2. 位宽统一：
+       - 8bit 数据：×255，转为 16bit 范围
+       - 16bit 数据：直接使用
+       - 所有数据最终归一化到 [0, 1] float32
+    
+    Example:
+        datasets = [
+            {'name': 'RICE2', 'path': '../Data/RICE2', 'type': 'standard', 'bit_depth': 8},
+            {'name': 'cloud_cover', 'path': '../Data/cloud_cover', 'type': 'cloud_cover', 'bit_depth': 16}
+        ]
+        
+        dataset = UnifiedDataset(
+            datasets=datasets,
+            target_channels=4,
+            target_bit_depth=16,
+            transform=transform
+        )
+    """
+    
+    def __init__(
+        self,
+        datasets: list,
+        target_channels: int = 4,
+        target_bit_depth: int = 16,
+        transform=None,
+        mode: str = 'train'
+    ):
+        """
+        Args:
+            datasets: 数据集配置列表，每个元素为 dict
+                     {'name': str, 'path': str, 'type': str, 'bit_depth': int, 'use_all_bands': bool}
+            target_channels: 目标通道数 (3 或 4)
+            target_bit_depth: 目标位深 (8 或 16)
+            transform: 数据增强
+            mode: 'train', 'val', 或 'test'
+        """
+        self.datasets = datasets
+        self.target_channels = target_channels
+        self.target_bit_depth = target_bit_depth
+        self.transform = transform
+        self.mode = mode
+        self.use_nir = target_channels == 4
+        
+        # 初始化 NIR 生成器（用于 3 通道数据集）
+        if self.use_nir:
+            self.nir_generator = NIRGenerator(method='physical', gain=1.1)
+        else:
+            self.nir_generator = None
+        
+        # 收集所有样本
+        self.samples = []  # [(dataset_name, dataset_type, bit_depth, image_path, mask_path), ...]
+        
+        for ds_cfg in datasets:
+            name = ds_cfg['name']
+            path = ds_cfg['path']
+            ds_type = ds_cfg.get('type', 'standard')
+            bit_depth = ds_cfg.get('bit_depth', 8)
+            use_all_bands = ds_cfg.get('use_all_bands', False)
+            
+            samples = self._collect_dataset_samples(name, path, ds_type, bit_depth, use_all_bands)
+            self.samples.extend(samples)
+            
+            print(f"[UnifiedDataset] {name} ({ds_type}, {bit_depth}bit): {len(samples)} samples")
+        
+        print(f"[UnifiedDataset] Total: {len(self.samples)} samples, "
+              f"{target_channels}ch, {target_bit_depth}bit, mode={mode}")
+    
+    def _collect_dataset_samples(self, name, path, ds_type, bit_depth, use_all_bands):
+        """收集单个数据集的样本"""
+        samples = []
+        
+        # 尝试不同的目录结构
+        possible_dirs = [
+            (os.path.join(path, 'images'), os.path.join(path, 'masks')),
+            (os.path.join(path, 'train', 'images'), os.path.join(path, 'train', 'masks')),
+            (os.path.join(path, 'val', 'images'), os.path.join(path, 'val', 'masks')),
+        ]
+        
+        image_dir = None
+        mask_dir = None
+        
+        for img_dir, msk_dir in possible_dirs:
+            if os.path.exists(img_dir) and os.path.exists(msk_dir):
+                image_dir = img_dir
+                mask_dir = msk_dir
+                break
+        
+        if image_dir is None:
+            print(f"Warning: Could not find valid dirs for {name} at {path}")
+            return []
+        
+        # 获取所有图像
+        image_paths = []
+        for ext in ['*.jpg', '*.png', '*.tif', '*.tiff']:
+            image_paths.extend(glob.glob(os.path.join(image_dir, ext)))
+        
+        image_paths.sort()
+        
+        # 验证并收集
+        for img_path in image_paths:
+            img_name = os.path.basename(img_path)
+            name_wo_ext = os.path.splitext(img_name)[0]
+            
+            mask_candidates = [
+                os.path.join(mask_dir, img_name),
+                os.path.join(mask_dir, name_wo_ext + '.png'),
+                os.path.join(mask_dir, name_wo_ext + '.jpg'),
+                os.path.join(mask_dir, name_wo_ext + '.tif'),
+            ]
+            
+            for mask_path in mask_candidates:
+                if os.path.exists(mask_path):
+                    samples.append((name, ds_type, bit_depth, use_all_bands, img_path, mask_path))
+                    break
+        
+        return samples
+    
+    def _load_and_unify_image(self, ds_type, bit_depth, use_all_bands, img_path):
+        """
+        加载图像并统一通道和位宽
+        
+        Returns:
+            image: [C, H, W] tensor in [0, 1], dtype float32
+        """
+        if ds_type == 'cloud_cover':
+            # 原生多通道高比特数据
+            try:
+                import tifffile
+                img = tifffile.imread(img_path)
+            except ImportError:
+                img = np.array(Image.open(img_path))
+            
+            # 处理维度
+            if img.ndim == 2:
+                img = np.stack([img] * 3, axis=-1)
+            elif img.ndim == 3 and img.shape[0] <= 4:
+                img = np.transpose(img, (1, 2, 0))
+            
+            # 归一化
+            if img.dtype == np.uint8:
+                img = img.astype(np.float32) / 255.0
+            elif img.dtype == np.uint16:
+                img = img.astype(np.float32) / 65535.0
+            elif img.dtype in [np.float32, np.float64]:
+                img = img.astype(np.float32)
+                if img.max() > 1:
+                    img = img / img.max()
+            
+            # 确保至少3通道
+            if img.shape[-1] < 3:
+                img = np.repeat(img, 3, axis=-1)
+            
+            # 处理第4通道
+            if self.target_channels == 4:
+                if img.shape[-1] >= 4 and use_all_bands:
+                    # 有原生 NIR
+                    img = img[:, :, :4]
+                else:
+                    # 需要生成 NIR
+                    r, g, b = img[:, :, 0], img[:, :, 1], img[:, :, 2]
+                    nir = 0.7 * r + 0.25 * g + 0.05 * b
+                    img = np.concatenate([img[:, :, :3], nir[:, :, np.newaxis]], axis=-1)
+            else:
+                img = img[:, :, :3]
+            
+        else:
+            # 标准 3 通道 8bit 数据
+            img = Image.open(img_path).convert('RGB')
+            img = np.array(img).astype(np.float32) / 255.0
+            
+            # 如果需要 4 通道，生成 NIR
+            if self.target_channels == 4:
+                r, g, b = img[:, :, 0], img[:, :, 1], img[:, :, 2]
+                nir = 0.7 * r + 0.25 * g + 0.05 * b
+                img = np.concatenate([img, nir[:, :, np.newaxis]], axis=-1)
+        
+        # 转为 tensor [C, H, W]
+        img_tensor = torch.from_numpy(np.transpose(img, (2, 0, 1))).float()
+        
+        return img_tensor
+    
+    def __len__(self):
+        return len(self.samples)
+    
+    def __getitem__(self, idx):
+        dataset_name, ds_type, bit_depth, use_all_bands, img_path, mask_path = self.samples[idx]
+        
+        # 加载并统一图像
+        image = self._load_and_unify_image(ds_type, bit_depth, use_all_bands, img_path)
+        
+        # 加载 mask
+        mask = Image.open(mask_path).convert('L')
+        mask_np = np.array(mask)
+        mask_np = (mask_np > 127).astype(np.uint8)
+        mask_tensor = torch.from_numpy(mask_np).long()
+        
+        # 应用数据增强（如果需要）
+        if self.transform is not None:
+            # 转回 PIL 用于变换（只取RGB部分）
+            img_rgb = image[:3].permute(1, 2, 0).numpy()
+            img_rgb = (img_rgb * 255).clip(0, 255).astype(np.uint8)
+            img_pil = Image.fromarray(img_rgb)
+            mask_pil = Image.fromarray(mask_np)
+            
+            # 变换（返回3通道 + NIR）
+            img_transformed, mask_transformed = self.transform(img_pil, mask_pil, self.mode)
+            
+            # 如果 transform 生成了4通道，使用它；否则手动添加保存的NIR
+            if self.use_nir and image.shape[0] == 4 and img_transformed.shape[0] == 3:
+                # resize 保存的 NIR
+                nir = TF.resize(image[3:4], img_transformed.shape[1:])
+                image = torch.cat([img_transformed, nir], dim=0)
+            else:
+                image = img_transformed
+            
+            mask = mask_transformed
+        
+        return {
+            'image': image,
+            'mask': mask,
+            'filename': os.path.basename(img_path),
+            'dataset': dataset_name,
+            'source_type': ds_type,
+            'original_bit_depth': bit_depth
+        }
+
+
+def create_mixed_dataloaders(config: dict, dev_run: bool = False):
+    """
+    创建多数据集混合数据加载器
+    
+    支持:
+    - 多数据集混合训练
+    - 自动统一通道和位宽
+    - 从训练集分层采样 val/test
+    
+    Returns:
+        train_loader, val_loader, test_loader
+    """
+    data_cfg = config['data']
+    train_cfg = config['training']
+    
+    # 检查是否启用多数据集模式
+    if not data_cfg.get('multi_dataset', False):
+        # 回退到标准 get_data_loaders
+        return get_data_loaders(config, dev_run)
+    
+    # 统一配置
+    target_channels = data_cfg.get('target_channels', 4)
+    target_bit_depth = data_cfg.get('target_bit_depth', 16)
+    use_nir = target_channels == 4
+    
+    print(f"\n[MixedDataLoader] Creating unified dataset: {target_channels}ch, {target_bit_depth}bit")
+    
+    # 数据增强
+    aug_config = train_cfg.get('augmentation', {'enabled': False})
+    aug_config['use_nir'] = use_nir
+    aug_config['nir_method'] = data_cfg.get('nir_method', 'physical')
+    aug_config['nir_gain'] = data_cfg.get('nir_gain', 1.1)
+    transform = CloudAugmentation(aug_config)
+    
+    # 获取数据集配置
+    datasets = data_cfg.get('datasets', [])
+    if not datasets:
+        raise ValueError("No datasets configured for multi-dataset mode")
+    
+    # 创建统一训练集（包含所有数据）
+    full_dataset = UnifiedDataset(
+        datasets=datasets,
+        target_channels=target_channels,
+        target_bit_depth=target_bit_depth,
+        transform=transform,
+        mode='train'
+    )
+    
+    # 获取 val/test 分割配置
+    split_cfg = data_cfg.get('val_test_split', {})
+    
+    if split_cfg.get('enabled', True):
+        # 从训练集分层采样 val/test
+        train_ratio = split_cfg.get('train_ratio', 0.75)
+        val_ratio = split_cfg.get('val_ratio', 0.15)
+        test_ratio = split_cfg.get('test_ratio', 0.10)
+        seed = split_cfg.get('seed', 42)
+        stratify = split_cfg.get('stratify', True)
+        
+        total_samples = len(full_dataset)
+        indices = list(range(total_samples))
+        
+        # 按数据集分层
+        if stratify:
+            # 收集每个数据集的索引
+            dataset_indices = defaultdict(list)
+            for idx, sample in enumerate(full_dataset.samples):
+                dataset_name = sample[0]  # dataset_name 是第0个元素
+                dataset_indices[dataset_name].append(idx)
+            
+            # 从每个数据集按比例采样
+            train_indices = []
+            val_indices = []
+            test_indices = []
+            
+            import random
+            random.seed(seed)
+            
+            for ds_name, ds_indices in dataset_indices.items():
+                n = len(ds_indices)
+                random.shuffle(ds_indices)
+                
+                n_test = int(n * test_ratio)
+                n_val = int(n * val_ratio)
+                n_train = n - n_val - n_test
+                
+                test_indices.extend(ds_indices[:n_test])
+                val_indices.extend(ds_indices[n_test:n_test+n_val])
+                train_indices.extend(ds_indices[n_test+n_val:])
+                
+                print(f"[MixedDataLoader] {ds_name}: train={n_train}, val={n_val}, test={n_test}")
+        else:
+            # 随机采样
+            import random
+            random.seed(seed)
+            random.shuffle(indices)
+            
+            n_test = int(total_samples * test_ratio)
+            n_val = int(total_samples * val_ratio)
+            n_train = total_samples - n_test - n_val
+            
+            test_indices = indices[:n_test]
+            val_indices = indices[n_test:n_test+n_val]
+            train_indices = indices[n_test+n_val:]
+        
+        # 创建子集
+        from torch.utils.data import Subset
+        train_dataset = Subset(full_dataset, train_indices)
+        val_dataset = Subset(full_dataset, val_indices)
+        test_dataset = Subset(full_dataset, test_indices)
+        
+        print(f"[MixedDataLoader] Split: train={len(train_indices)}, val={len(val_indices)}, test={len(test_indices)}")
+    else:
+        # 使用全部数据训练，需要外部提供 val/test
+        train_dataset = full_dataset
+        val_dataset = None
+        test_dataset = None
+    
+    # Dev run: 限制数据集大小
+    if dev_run:
+        from torch.utils.data import Subset
+        train_samples = min(64, len(train_dataset))
+        val_samples = min(16, len(val_dataset)) if val_dataset else 0
+        test_samples = min(16, len(test_dataset)) if test_dataset else 0
+        
+        train_dataset = Subset(train_dataset, range(train_samples))
+        if val_dataset:
+            val_dataset = Subset(val_dataset, range(val_samples))
+        if test_dataset:
+            test_dataset = Subset(test_dataset, range(test_samples))
+        
+        print(f"[Dev Run] Limited: train={train_samples}, val={val_samples}, test={test_samples}")
+    
+    # 创建 DataLoader
+    num_workers = train_cfg.get('num_workers', 4)
+    batch_size = train_cfg.get('batch_size', 8)
+    
+    # 4通道需要调整 batch_size
+    if use_nir and batch_size > 4:
+        adjusted = max(4, batch_size // 2)
+        print(f"[MixedDataLoader] Adjusted batch_size: {batch_size} -> {adjusted} (4-channel)")
+        batch_size = adjusted
+    
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=batch_size,
+        shuffle=True,
+        num_workers=num_workers,
+        pin_memory=True,
+        drop_last=True
+    )
+    
+    val_loader = None
+    test_loader = None
+    
+    if val_dataset:
+        val_loader = DataLoader(
+            val_dataset,
+            batch_size=batch_size,
+            shuffle=False,
+            num_workers=num_workers,
+            pin_memory=True
+        )
+    
+    if test_dataset:
+        test_loader = DataLoader(
+            test_dataset,
+            batch_size=1,
+            shuffle=False,
+            num_workers=num_workers,
+            pin_memory=True
+        )
+    
+    return train_loader, val_loader, test_loader

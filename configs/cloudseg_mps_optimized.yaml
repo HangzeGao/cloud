@@ -1,5 +1,6 @@
 # CloudSense-Net Apple MPS (Metal Performance Shaders) 优化配置
 # 专为 Apple Silicon (M1/M2/M3) 优化的配置
+# 支持多数据集混合训练
 
 # ==================== 模型架构配置 ====================
 model:
@@ -76,36 +77,62 @@ training:
     contrast: 0.2
     gaussian_noise: 0.01
 
-# ==================== 数据配置 ====================
+# ==================== 多数据集混合训练配置 ====================
 data:
-  train_data_path: "../Data/RICE2"
-  val_data_path: "../Data/HRC_WHU"
-  test_data_path: "../Data/HRC_WHU"
-
-  # 是否启用 NIR 通道 (RGB -> RGB+NIR)
-  use_nir: true
-
-  # NIR 生成算法:
-  # - 'physical': 基于云光谱物理特性 (推荐)
-  #   公式: NIR = 0.7*R + 0.25*G + 0.05*B
-  #   原理: 云在 NIR (0.76-0.90μm) 具有高反射率
-  #
-  # - 'vegetation': 基于植被指数启发
-  #   公式: NIR ≈ (R + G) / 2 + 0.3 * |G - R|
-  #   原理: 利用绿波段与红波段的差异估算近红外反射率
-  #
-  # - 'enhanced': 增强型，结合局部对比度
-  #   公式: NIR = 0.65*R + 0.30*G + 0.05*B + variance_enhancement
-  #   原理: 增加云的边缘检测能力
-  #
-  # - 'weighted': 简单加权组合
-  #   公式: NIR = 0.65*R + 0.25*G + 0.10*B
-  #   原理: 平衡加权，适合一般场景
+  # 是否启用多数据集混合训练模式
+  multi_dataset: true
+  
+  # 多数据集列表（所有数据集均用作训练）
+  # 支持不同类型数据集混合：
+  # - 标准 3 通道 8bit: RICE2, HRC_WHU
+  # - 原生 4 通道 16bit: cloud_cover_detection
+  datasets:
+    - name: "RICE2"
+      path: "../Data/RICE2"
+      type: "standard"      # 标准 3 通道 8bit
+      weight: 1.0          # 采样权重
+      bit_depth: 8
+      use_all_bands: false
+      
+    - name: "HRC_WHU"
+      path: "../Data/HRC_WHU"
+      type: "standard"      # 标准 3 通道 8bit
+      weight: 1.0
+      bit_depth: 8
+      use_all_bands: false
+      
+    - name: "cloud_cover_detection"
+      path: "../Data/cloud_cover_detection"
+      type: "cloud_cover"   # 原生 4 通道 16bit
+      weight: 0.8          # 稍微降低权重以平衡样本数
+      bit_depth: 16
+      use_all_bands: true   # 使用原生 NIR
+  
+  # 数据统一配置（所有数据集将被统一到这些设置）
+  # 通道设置
+  target_channels: 4      # 目标通道数：4 (RGB+NIR)
+  use_nir: true           # 统一使用 NIR
+  
+  # NIR 生成算法（用于从 RGB 生成 NIR 的数据集）
   nir_method: "physical"
-
-  # NIR 增益系数: 云在 NIR 反射率通常比 RGB 高 10-30%
-  # 推荐范围: 1.0 - 1.3
   nir_gain: 1.1
+  
+  # 位宽统一设置
+  target_bit_depth: 16    # 目标位深：16bit
+  normalize_method: "max" # 归一化方法: "max" (除以最大值), "percentile" (基于分位数)
+  
+  # Val/Test 采样配置（从混合训练集中采样）
+  val_test_split:
+    enabled: true
+    val_ratio: 0.15        # 15% 用作验证
+    test_ratio: 0.10       # 10% 用作测试
+    train_ratio: 0.75      # 75% 用作训练
+    seed: 42               # 随机种子保证可复现
+    stratify: true         # 分层采样（保持各数据集比例）
+  
+  # 可选：使用固定目录（如果不从训练集采样）
+  # val_data_path: "../Data/HRC_WHU"
+  # test_data_path: "../Data/HRC_WHU"
 
   inference:
     mode: "sliding_window"
@@ -132,3 +159,9 @@ experiment:
 # - batch_size根据Mac内存调整: M2(8GB)->4, M2 Pro(16GB)->8, M2 Max(32GB)->16
 # - 避免使用Swin Transformer（在MPS上性能不佳）
 # - 推荐使用ConvNeXt或EfficientNet
+#
+# 多数据集混合训练说明:
+# - 所有数据集统一为 4 通道 16bit
+# - 3通道数据集自动生成 NIR
+# - 16bit 数据集自动归一化
+# - val/test 从训练集分层采样

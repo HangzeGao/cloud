@@ -19,7 +19,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from models import CloudSenseNet, build_model
 from utils import load_config, save_config, SegmentationMetrics, AverageMeter
-from data import get_data_loaders
+from data import get_data_loaders, create_mixed_dataloaders
 
 
 def set_seed(seed: int):
@@ -310,7 +310,18 @@ def main():
     
     # 获取数据加载器
     print("Loading data...")
-    train_loader, val_loader, _ = get_data_loaders(config, dev_run=args.dev_run)
+    
+    # 检查是否启用多数据集混合训练
+    if config['data'].get('multi_dataset', False):
+        print("[Train] Multi-dataset mixed training mode enabled")
+        train_loader, val_loader, test_loader = create_mixed_dataloaders(config, dev_run=args.dev_run)
+    else:
+        train_loader, val_loader, test_loader = get_data_loaders(config, dev_run=args.dev_run)
+    
+    if train_loader is None:
+        raise RuntimeError("Failed to create train_loader")
+    if val_loader is None:
+        print("Warning: No validation loader created")
     
     # 创建模型
     print("Creating model...")
