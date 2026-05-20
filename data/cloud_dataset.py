@@ -264,18 +264,23 @@ class CloudAugmentation:
         应用数据增强
         
         Args:
-            image: PIL.Image (RGB) or torch.Tensor [C, H, W]
-            mask: PIL.Image (L) or torch.Tensor [H, W]
+            image: PIL.Image (RGB) or torch.Tensor [C, H, W] or numpy.ndarray [C, H, W]
+            mask: PIL.Image (L) or torch.Tensor [H, W] or numpy.ndarray [H, W]
             mode: 'train' or 'val'
             
         Returns:
             image: torch.Tensor [C, H, W] (如果 use_nir=True, C=4)
             mask: torch.Tensor [H, W]
         """
-        # 转换为 Tensor
-        if isinstance(image, Image.Image):
+        # 统一转换为 torch.Tensor
+        if isinstance(image, np.ndarray):
+            image = torch.from_numpy(image).float()  # [C, H, W]
+        elif isinstance(image, Image.Image):
             image = T.ToTensor()(image)  # [3, H, W]
-        if isinstance(mask, Image.Image):
+            
+        if isinstance(mask, np.ndarray):
+            mask = torch.from_numpy(mask).long()  # [H, W]
+        elif isinstance(mask, Image.Image):
             mask = torch.from_numpy(np.array(mask)).long()
         
         if not self.enabled or mode != 'train':
@@ -303,17 +308,31 @@ class CloudAugmentation:
             image = TF.vflip(image)
             mask = TF.vflip(mask.unsqueeze(0)).squeeze(0)
         
-        # 4. 亮度调整
+        # 4. 亮度调整 (只应用于RGB通道)
         brightness = self.config.get('brightness', 0)
         if brightness > 0:
             brightness_factor = torch.empty(1).uniform_(1 - brightness, 1 + brightness).item()
-            image = TF.adjust_brightness(image, brightness_factor)
+            if image.shape[0] == 4:
+                # 4通道: 只调整RGB，保留NIR
+                rgb = image[:3]
+                nir = image[3:]
+                rgb = TF.adjust_brightness(rgb, brightness_factor)
+                image = torch.cat([rgb, nir], dim=0)
+            else:
+                image = TF.adjust_brightness(image, brightness_factor)
         
-        # 5. 对比度调整
+        # 5. 对比度调整 (只应用于RGB通道)
         contrast = self.config.get('contrast', 0)
         if contrast > 0:
             contrast_factor = torch.empty(1).uniform_(1 - contrast, 1 + contrast).item()
-            image = TF.adjust_contrast(image, contrast_factor)
+            if image.shape[0] == 4:
+                # 4通道: 只调整RGB，保留NIR
+                rgb = image[:3]
+                nir = image[3:]
+                rgb = TF.adjust_contrast(rgb, contrast_factor)
+                image = torch.cat([rgb, nir], dim=0)
+            else:
+                image = TF.adjust_contrast(image, contrast_factor)
         
         # 6. 高斯噪声
         noise_std = self.config.get('gaussian_noise', 0)
@@ -322,10 +341,14 @@ class CloudAugmentation:
             image = image + noise
             image = torch.clamp(image, 0, 1)
         
-        # 7. 添加 NIR 通道
+        # 7. 添加 NIR 通道 (如果输入是3通道且需要4通道)
         if self.use_nir and self.nir_generator is not None and image.shape[0] == 3:
             nir = self.nir_generator(image)  # [1, H, W]
             image = torch.cat([image, nir], dim=0)  # [4, H, W]
+        
+        # 如果输入已经是4通道但use_nir=False，只保留RGB
+        if not self.use_nir and image.shape[0] == 4:
+            image = image[:3]  # 只保留RGB
         
         return image, mask
 
@@ -1056,6 +1079,7 @@ def create_mixed_dataloaders(config: dict, dev_run: bool = False):
     """
     创建多数据集混合数据加载器
     
+    使用上层 Data 目录的 UnifiedCloudDataset
     支持:
     - 多数据集混合训练
     - 自动统一通道和位宽
@@ -1067,17 +1091,10 @@ def create_mixed_dataloaders(config: dict, dev_run: bool = False):
     data_cfg = config['data']
     train_cfg = config['training']
     
-    # 检查是否启用多数据集模式
-    if not data_cfg.get('multi_dataset', False):
-        # 回退到标准 get_data_loaders
-        return get_data_loaders(config, dev_run)
-    
     # 统一配置
     target_channels = data_cfg.get('target_channels', 4)
     target_bit_depth = data_cfg.get('target_bit_depth', 16)
     use_nir = target_channels == 4
-    
-    print(f"\n[MixedDataLoader] Creating unified dataset: {target_channels}ch, {target_bit_depth}bit")
     
     # 数据增强
     aug_config = train_cfg.get('augmentation', {'enabled': False})
@@ -1091,99 +1108,97 @@ def create_mixed_dataloaders(config: dict, dev_run: bool = False):
     if not datasets:
         raise ValueError("No datasets configured for multi-dataset mode")
     
-    # 创建统一训练集（包含所有数据）
-    full_dataset = UnifiedDataset(
-        datasets=datasets,
-        target_channels=target_channels,
-        target_bit_depth=target_bit_depth,
-        transform=transform,
-        mode='train'
-    )
+    # 提取数据集名称列表
+    dataset_names = [ds['name'].lower().replace('_', '') for ds in datasets]
+    print(f"\n[MixedDataLoader] Using UnifiedCloudDataset from upper Data directory")
+    print(f"  Datasets: {dataset_names}")
+    print(f"  Target: {target_channels}ch, normalize={data_cfg.get('normalization', {}).get('method', 'auto')}")
+    
+    # 从上层 Data 目录导入 UnifiedCloudDataset
+    import sys
+    from pathlib import Path
+    data_dir = Path(__file__).parent.parent.parent / "Data"
+    if str(data_dir) not in sys.path:
+        sys.path.insert(0, str(data_dir))
+    from cloud_dataset_loader import UnifiedCloudDataset
     
     # 获取 val/test 分割配置
     split_cfg = data_cfg.get('val_test_split', {})
+    train_ratio = split_cfg.get('train_ratio', 0.75)
+    val_ratio = split_cfg.get('val_ratio', 0.15)
+    test_ratio = split_cfg.get('test_ratio', 0.10)
+    seed = split_cfg.get('seed', 42)
     
-    if split_cfg.get('enabled', True):
-        # 从训练集分层采样 val/test
-        train_ratio = split_cfg.get('train_ratio', 0.75)
-        val_ratio = split_cfg.get('val_ratio', 0.15)
-        test_ratio = split_cfg.get('test_ratio', 0.10)
-        seed = split_cfg.get('seed', 42)
-        stratify = split_cfg.get('stratify', True)
-        
-        total_samples = len(full_dataset)
-        indices = list(range(total_samples))
-        
-        # 按数据集分层
-        if stratify:
-            # 收集每个数据集的索引
-            dataset_indices = defaultdict(list)
-            for idx, sample in enumerate(full_dataset.samples):
-                dataset_name = sample[0]  # dataset_name 是第0个元素
-                dataset_indices[dataset_name].append(idx)
-            
-            # 从每个数据集按比例采样
-            train_indices = []
-            val_indices = []
-            test_indices = []
-            
-            import random
-            random.seed(seed)
-            
-            for ds_name, ds_indices in dataset_indices.items():
-                n = len(ds_indices)
-                random.shuffle(ds_indices)
-                
-                n_test = int(n * test_ratio)
-                n_val = int(n * val_ratio)
-                n_train = n - n_val - n_test
-                
-                test_indices.extend(ds_indices[:n_test])
-                val_indices.extend(ds_indices[n_test:n_test+n_val])
-                train_indices.extend(ds_indices[n_test+n_val:])
-                
-                print(f"[MixedDataLoader] {ds_name}: train={n_train}, val={n_val}, test={n_test}")
-        else:
-            # 随机采样
-            import random
-            random.seed(seed)
-            random.shuffle(indices)
-            
-            n_test = int(total_samples * test_ratio)
-            n_val = int(total_samples * val_ratio)
-            n_train = total_samples - n_test - n_val
-            
-            test_indices = indices[:n_test]
-            val_indices = indices[n_test:n_test+n_val]
-            train_indices = indices[n_test+n_val:]
-        
-        # 创建子集
-        from torch.utils.data import Subset
-        train_dataset = Subset(full_dataset, train_indices)
-        val_dataset = Subset(full_dataset, val_indices)
-        test_dataset = Subset(full_dataset, test_indices)
-        
-        print(f"[MixedDataLoader] Split: train={len(train_indices)}, val={len(val_indices)}, test={len(test_indices)}")
-    else:
-        # 使用全部数据训练，需要外部提供 val/test
-        train_dataset = full_dataset
-        val_dataset = None
-        test_dataset = None
+    # 统一数据集目录
+    unified_data_dir = data_cfg.get('unified_data_dir', '../Data/Unified_Cloud_Dataset')
+    
+    # 确定归一化方法
+    norm_method = data_cfg.get('normalization', {}).get('method', 'auto')
+    # 映射配置方法到 UnifiedCloudDataset 支持的方法
+    norm_mapping = {
+        'percentile': 'percentile',
+        'max': 'minmax',
+        'zscore': 'standard',
+        'sensor': 'reflectance',
+        'clahe': 'percentile',  # CLAHE 需要单独处理，fallback 到 percentile
+        'histeq': 'percentile',
+    }
+    normalize = norm_mapping.get(norm_method, 'auto')
+    
+    # 确定波段
+    bands = ["B02", "B03", "B04", "B08"] if use_nir else ["B02", "B03", "B04"]
+    
+    # 创建三个数据集
+    train_dataset = UnifiedCloudDataset(
+        data_dir=unified_data_dir,
+        split='train',
+        bands=bands,
+        datasets=dataset_names if dataset_names else None,
+        transform=transform,
+        normalize=normalize,
+        train_ratio=train_ratio,
+        val_ratio=val_ratio,
+        random_seed=seed,
+    )
+    
+    val_dataset = UnifiedCloudDataset(
+        data_dir=unified_data_dir,
+        split='val',
+        bands=bands,
+        datasets=dataset_names if dataset_names else None,
+        transform=None,  # 验证集不使用数据增强
+        normalize=normalize,
+        train_ratio=train_ratio,
+        val_ratio=val_ratio,
+        random_seed=seed,
+    )
+    
+    test_dataset = UnifiedCloudDataset(
+        data_dir=unified_data_dir,
+        split='test',
+        bands=bands,
+        datasets=dataset_names if dataset_names else None,
+        transform=None,
+        normalize=normalize,
+        train_ratio=train_ratio,
+        val_ratio=val_ratio,
+        random_seed=seed,
+    )
     
     # Dev run: 限制数据集大小
     if dev_run:
         from torch.utils.data import Subset
         train_samples = min(64, len(train_dataset))
-        val_samples = min(16, len(val_dataset)) if val_dataset else 0
-        test_samples = min(16, len(test_dataset)) if test_dataset else 0
+        val_samples = min(16, len(val_dataset))
+        test_samples = min(16, len(test_dataset))
         
         train_dataset = Subset(train_dataset, range(train_samples))
-        if val_dataset:
-            val_dataset = Subset(val_dataset, range(val_samples))
-        if test_dataset:
-            test_dataset = Subset(test_dataset, range(test_samples))
+        val_dataset = Subset(val_dataset, range(val_samples))
+        test_dataset = Subset(test_dataset, range(test_samples))
         
         print(f"[Dev Run] Limited: train={train_samples}, val={val_samples}, test={test_samples}")
+    
+    print(f"[MixedDataLoader] Loaded: train={len(train_dataset)}, val={len(val_dataset)}, test={len(test_dataset)}")
     
     # 创建 DataLoader
     num_workers = train_cfg.get('num_workers', 4)
@@ -1201,28 +1216,61 @@ def create_mixed_dataloaders(config: dict, dev_run: bool = False):
         shuffle=True,
         num_workers=num_workers,
         pin_memory=True,
-        drop_last=True
+        drop_last=True,
+        collate_fn=_unified_dataset_collate
     )
     
-    val_loader = None
-    test_loader = None
+    val_loader = DataLoader(
+        val_dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=num_workers,
+        pin_memory=True,
+        collate_fn=_unified_dataset_collate
+    )
     
-    if val_dataset:
-        val_loader = DataLoader(
-            val_dataset,
-            batch_size=batch_size,
-            shuffle=False,
-            num_workers=num_workers,
-            pin_memory=True
-        )
-    
-    if test_dataset:
-        test_loader = DataLoader(
-            test_dataset,
-            batch_size=1,
-            shuffle=False,
-            num_workers=num_workers,
-            pin_memory=True
-        )
+    test_loader = DataLoader(
+        test_dataset,
+        batch_size=1,
+        shuffle=False,
+        num_workers=num_workers,
+        pin_memory=True,
+        collate_fn=_unified_dataset_collate
+    )
     
     return train_loader, val_loader, test_loader
+
+
+def _unified_dataset_collate(batch):
+    """
+    自定义 collate 函数，将 UnifiedCloudDataset 的 tuple 输出转换为 dict
+    
+    输入: list of (image, mask, info) tuples
+          image: numpy ndarray or torch.Tensor (C, H, W)
+          mask: numpy ndarray or torch.Tensor (H, W)
+    输出: dict with batched tensors
+    """
+    images = []
+    masks = []
+    filenames = []
+    datasets = []
+    
+    for image, mask, info in batch:
+        # 统一转换为 tensor
+        if isinstance(image, np.ndarray):
+            image = torch.from_numpy(image).float()
+        if isinstance(mask, np.ndarray):
+            mask = torch.from_numpy(mask).long()
+        
+        images.append(image)
+        masks.append(mask)
+        filenames.append(info['id'])
+        datasets.append(info['dataset'])
+    
+    # Stack into batch
+    return {
+        'image': torch.stack(images),
+        'mask': torch.stack(masks),
+        'filename': filenames,
+        'dataset': datasets,
+    }

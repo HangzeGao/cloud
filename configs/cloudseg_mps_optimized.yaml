@@ -82,6 +82,9 @@ data:
   # 是否启用多数据集混合训练模式
   multi_dataset: true
   
+  # 统一数据集目录（上层 Data 目录的 Unified_Cloud_Dataset）
+  unified_data_dir: "../Data/Unified_Cloud_Dataset"
+  
   # 多数据集列表（所有数据集均用作训练）
   # 支持不同类型数据集混合：
   # - 标准 3 通道 8bit: RICE2, HRC_WHU
