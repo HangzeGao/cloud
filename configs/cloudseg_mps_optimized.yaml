@@ -85,28 +85,31 @@ data:
   # 多数据集列表（所有数据集均用作训练）
   # 支持不同类型数据集混合：
   # - 标准 3 通道 8bit: RICE2, HRC_WHU
-  # - 原生 4 通道 16bit: cloud_cover_detection
+  # - 原生 4 通道 13bit: cloud_cover_detection
   datasets:
-    - name: "RICE2"
-      path: "../Data/RICE2"
-      type: "standard"      # 标准 3 通道 8bit
-      weight: 1.0          # 采样权重
-      bit_depth: 8
-      use_all_bands: false
-      
     - name: "HRC_WHU"
       path: "../Data/HRC_WHU"
       type: "standard"      # 标准 3 通道 8bit
+      bit_depth: 8            # 位宽: 8bit
+      channels: 3             # 通道: RGB
+      weight: 1.0           # 采样权重
+      use_all_bands: false    # 从RGB生成伪NIR
+      
+    - name: "RICE2"
+      path: "../Data/RICE2"
+      type: "standard"      # 标准 3 通道 8bit
+      bit_depth: 8            # 位宽: 8bit
+      channels: 3             # 通道: RGB
       weight: 1.0
-      bit_depth: 8
-      use_all_bands: false
+      use_all_bands: false    # 从RGB生成伪NIR
       
     - name: "cloud_cover_detection"
       path: "../Data/cloud_cover_detection"
-      type: "cloud_cover"   # 原生 4 通道 16bit
-      weight: 0.8          # 稍微降低权重以平衡样本数
-      bit_depth: 16
-      use_all_bands: true   # 使用原生 NIR
+      type: "cloud_cover"   # 原生 4 通道 13bit
+      bit_depth: 13           # 位宽: 13bit（非标准16bit）
+      channels: 4             # 通道: RGB+NIR
+      weight: 0.8           # 稍微降低权重以平衡样本数
+      use_all_bands: true   # 使用原生 NIR 通道
   
   # 数据统一配置（所有数据集将被统一到这些设置）
   # 通道设置
@@ -119,7 +122,27 @@ data:
   
   # 位宽统一设置
   target_bit_depth: 16    # 目标位深：16bit
-  normalize_method: "max" # 归一化方法: "max" (除以最大值), "percentile" (基于分位数)
+  
+  # 业界标准的图像归一化方法配置
+  normalization:
+    # 归一化方法选择:
+    # - 'max': 最大值归一化 (简单直接，但容易受异常值影响)
+    # - 'percentile': 基于分位数的归一化 (业界推荐，鲁棒性强)
+    #    使用 1%-99% 分位数范围，去除极值影响
+    # - 'zscore': Z-score 标准化 (均值为0，方差为1)
+    # - 'histeq': 直方图均衡化 (增强对比度)
+    # - 'clahe': 对比度受限的自适应直方图均衡化 (业界标准，局部增强)
+    #    特别适合非均匀光照的云层图像
+    # - 'sensor': 传感器特定定标 (需要具体传感器参数)
+    method: "percentile"    # 推荐使用 percentile
+    
+    # 分位数归一化参数 (当 method='percentile' 时有效)
+    lower_percentile: 1.0   # 下分位数 (去除暗部异常，如阴影、噪声)
+    upper_percentile: 99.0  # 上分位数 (去除亮部异常，如眩光、过曝)
+    
+    # CLAHE 参数 (当 method='clahe' 时有效)
+    clip_limit: 2.0         # 对比度限制 (防止过度增强)
+    tile_grid_size: [8, 8]  # 网格大小 (将图像分为 8x8 块局部处理)
   
   # Val/Test 采样配置（从混合训练集中采样）
   val_test_split:

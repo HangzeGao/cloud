@@ -4,10 +4,9 @@ from .cloud_dataset import (
     NIRGenerator, 
     CloudAugmentation,
     InferenceDataset,
-    CloudCoverDataset,
-    MultiDatasetSampler,
     UnifiedDataset,
-    create_mixed_dataloaders
+    create_mixed_dataloaders,
+    ImageNormalizer
 )
 
 __all__ = [
@@ -16,8 +15,7 @@ __all__ = [
     'NIRGenerator', 
     'CloudAugmentation',
     'InferenceDataset',
-    'CloudCoverDataset',
-    'MultiDatasetSampler',
     'UnifiedDataset',
-    'create_mixed_dataloaders'
+    'create_mixed_dataloaders',
+    'ImageNormalizer'
 ]

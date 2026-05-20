@@ -2,9 +2,12 @@
 云分割数据集加载器
 支持RICE2、HRC_WHU等云分割数据集
 支持 RGB + NIR 四通道输入
+支持业界标准的图像归一化方法
 """
 import os
 import glob
+from collections import defaultdict
+
 import torch
 from torch.utils.data import Dataset, DataLoader
 from PIL import Image
@@ -13,98 +16,460 @@ import torchvision.transforms as T
 import torchvision.transforms.functional as TF
 
 
+class ImageNormalizer:
+    """
+    业界标准的图像归一化方法
+    
+    支持多种遥感/卫星图像常用的归一化策略：
+    - 'max': 最大值归一化
+    - 'percentile': 基于分位数的归一化 (业界推荐)
+    - 'zscore': Z-score 标准化
+    - 'histeq': 直方图均衡化
+    - 'clahe': 对比度受限的自适应直方图均衡化 (业界标准)
+    - 'sensor': 传感器特定定标
+    """
+    
+    def __init__(self, method: str = 'percentile', bit_depth: int = None,
+                 lower_percentile: float = 1.0, upper_percentile: float = 99.0,
+                 clip_limit: float = 2.0, tile_grid_size: tuple = (8, 8)):
+        self.method = method
+        self.bit_depth = bit_depth
+        self.lower_p = lower_percentile
+        self.upper_p = upper_percentile
+        self.clip_limit = clip_limit
+        self.tile_grid_size = tile_grid_size
+        self.dataset_mean = None
+        self.dataset_std = None
+    
+    def __call__(self, image: np.ndarray, per_image: bool = True) -> np.ndarray:
+        img = image.astype(np.float32)
+        
+        if self.method == 'max':
+            return self._normalize_max(img)
+        elif self.method == 'percentile':
+            return self._normalize_percentile(img, per_image)
+        elif self.method == 'zscore':
+            return self._normalize_zscore(img, per_image)
+        elif self.method == 'histeq':
+            return self._normalize_histeq(img)
+        elif self.method == 'clahe':
+            return self._normalize_clahe(img)
+        elif self.method == 'sensor':
+            return self._normalize_sensor(img)
+        else:
+            raise ValueError(f"Unknown normalization method: {self.method}")
+    
+    def _normalize_max(self, img: np.ndarray) -> np.ndarray:
+        if self.bit_depth is not None:
+            max_val = (1 << self.bit_depth) - 1
+        else:
+            if img.dtype == np.uint8 or img.max() <= 255:
+                max_val = 255.0
+            elif img.dtype == np.uint16 or img.max() <= 65535:
+                max_val = 65535.0
+            else:
+                max_val = img.max()
+        return img / max_val
+    
+    def _normalize_percentile(self, img: np.ndarray, per_image: bool) -> np.ndarray:
+        if per_image:
+            lower = np.percentile(img, self.lower_p)
+            upper = np.percentile(img, self.upper_p)
+        else:
+            lower = getattr(self, 'dataset_lower', np.percentile(img, self.lower_p))
+            upper = getattr(self, 'dataset_upper', np.percentile(img, self.upper_p))
+        img_normalized = (img - lower) / (upper - lower + 1e-8)
+        return np.clip(img_normalized, 0, 1)
+    
+    def _normalize_zscore(self, img: np.ndarray, per_image: bool) -> np.ndarray:
+        if per_image or self.dataset_mean is None:
+            mean = img.mean()
+            std = img.std()
+        else:
+            mean = self.dataset_mean
+            std = self.dataset_std
+        std = std + 1e-8
+        return (img - mean) / std
+    
+    def _normalize_histeq(self, img: np.ndarray) -> np.ndarray:
+        try:
+            from skimage import exposure
+        except ImportError:
+            return self._normalize_max(img)
+        result = np.zeros_like(img)
+        for c in range(img.shape[-1]):
+            channel = img[:, :, c]
+            channel_min, channel_max = channel.min(), channel.max()
+            channel_norm = (channel - channel_min) / (channel_max - channel_min + 1e-8)
+            channel_eq = exposure.equalize_hist(channel_norm)
+            result[:, :, c] = channel_eq
+        return result.astype(np.float32)
+    
+    def _normalize_clahe(self, img: np.ndarray) -> np.ndarray:
+        try:
+            import cv2
+        except ImportError:
+            return self._normalize_histeq(img)
+        result = np.zeros_like(img)
+        for c in range(img.shape[-1]):
+            channel = img[:, :, c]
+            channel_min, channel_max = channel.min(), channel.max()
+            channel_uint8 = ((channel - channel_min) / (channel_max - channel_min + 1e-8) * 255).astype(np.uint8)
+            clahe = cv2.createCLAHE(clipLimit=self.clip_limit, tileGridSize=self.tile_grid_size)
+            channel_clahe = clahe.apply(channel_uint8)
+            result[:, :, c] = channel_clahe.astype(np.float32) / 255.0
+        return result
+    
+    def _normalize_sensor(self, img: np.ndarray) -> np.ndarray:
+        img = self._normalize_max(img)
+        return np.clip(img, 0, 1)
+    
+    def compute_dataset_statistics(self, images: list):
+        all_pixels = []
+        for img_path in images:
+            img = np.array(Image.open(img_path))
+            all_pixels.extend(img.flatten())
+        all_pixels = np.array(all_pixels, dtype=np.float32)
+        self.dataset_mean = all_pixels.mean()
+        self.dataset_std = all_pixels.std()
+        self.dataset_lower = np.percentile(all_pixels, self.lower_p)
+        self.dataset_upper = np.percentile(all_pixels, self.upper_p)
+
+    def set_bit_depth(self, bit_depth: int):
+        """动态设置位宽，支持任意位宽（如8, 13, 16）"""
+        self.bit_depth = bit_depth
+
+
 class NIRGenerator:
     """
-    NIR（近红外）通道生成器
+    伪 NIR 通道生成器
     
-    基于业界最优算法，从 RGB 图像生成伪 NIR 通道。
-    利用云在 NIR 波段的高反射率特性（通常比红波段高 10-20%）。
+    从 RGB 图像生成伪近红外（NIR）通道的多种算法
+    基于业界常用的物理模型和植被指数方法
     
-    支持算法:
-    - 'physical': 基于云光谱物理特性的线性组合 (推荐)
-    - 'vegetation': 基于植被指数启发的方法
-    - 'enhanced': 增强型，结合对比度和边缘信息
-    - 'weighted': 可配置加权组合
-    
-    Reference:
-    - 云在 NIR (0.7-1.0μm) 具有高反射率，接近红波段
-    - 使用经验系数: NIR = 0.7*R + 0.25*G + 0.05*B + offset
+    Methods:
+        - 'physical': 基于物理模型的 NIR 估计 (NIR ≈ 0.7*R + 0.25*G + 0.05*B)
+        - 'vegetation': 基于 NDVI 的植被增强 (更适合有云区域)
+        - 'enhanced': 增强型，结合亮度和色彩信息
+        - 'weighted': 自适应加权组合
     """
     
-    def __init__(self, method: str = 'physical', gain: float = 1.1, offset: float = 0.05):
-        """
-        Args:
-            method: NIR生成算法 ('physical', 'vegetation', 'enhanced', 'weighted')
-            gain: NIR 增益系数 (云在 NIR 反射率通常比 RGB 高 10-30%)
-            offset: 基础偏移量
-        """
+    def __init__(self, method: str = 'physical', gain: float = 1.1):
         self.method = method
         self.gain = gain
-        self.offset = offset
         
-        # 预定义算法系数
-        self.coefficients = {
-            'physical': {'r': 0.70, 'g': 0.25, 'b': 0.05},  # 基于云光谱特性
-            'vegetation': {'r': 0.60, 'g': 0.35, 'b': 0.05},  # 植被指数启发
-            'enhanced': {'r': 0.65, 'g': 0.30, 'b': 0.05},   # 增强对比度
-            'weighted': {'r': 0.65, 'g': 0.25, 'b': 0.10},   # 平衡加权
-        }
+        print(f"[NIRGenerator] Initialized with method='{method}', gain={gain}")
     
-    def __call__(self, rgb_image: torch.Tensor) -> torch.Tensor:
+    def __call__(self, rgb_image):
         """
         从 RGB 图像生成 NIR 通道
         
         Args:
-            rgb_image: [3, H, W] 的 RGB 张量，值域 [0, 1]
+            rgb_image: torch.Tensor [3, H, W] or [B, 3, H, W], 值范围 [0, 1]
             
         Returns:
-            nir: [1, H, W] 的 NIR 张量，值域 [0, 1]
+            nir: torch.Tensor [1, H, W] or [B, 1, H, W], 值范围 [0, 1]
         """
-        r, g, b = rgb_image[0], rgb_image[1], rgb_image[2]
+        if isinstance(rgb_image, torch.Tensor):
+            # 处理 torch Tensor
+            if rgb_image.dim() == 3:
+                r, g, b = rgb_image[0], rgb_image[1], rgb_image[2]
+            elif rgb_image.dim() == 4:
+                r, g, b = rgb_image[:, 0], rgb_image[:, 1], rgb_image[:, 2]
+            else:
+                raise ValueError(f"Expected 3 or 4 dim tensor, got {rgb_image.dim()}")
+            
+            if self.method == 'physical':
+                nir = 0.7 * r + 0.25 * g + 0.05 * b
+            elif self.method == 'vegetation':
+                # 植被指数风格：增强绿色，抑制蓝色
+                nir = 0.6 * r + 0.4 * g - 0.1 * b
+                nir = torch.clamp(nir, 0, 1)
+            elif self.method == 'enhanced':
+                # 增强型：结合亮度
+                luminance = 0.299 * r + 0.587 * g + 0.114 * b
+                nir = 0.5 * r + 0.3 * g + 0.2 * luminance
+            elif self.method == 'weighted':
+                # 自适应：根据红色通道强度调整
+                red_weight = torch.sigmoid((r - 0.5) * 4)  # 自适应权重
+                nir = red_weight * (0.8 * r + 0.2 * g) + (1 - red_weight) * (0.5 * r + 0.3 * g + 0.2 * b)
+            else:
+                raise ValueError(f"Unknown NIR method: {self.method}")
+            
+            nir = nir * self.gain
+            nir = torch.clamp(nir, 0, 1)
+            
+            # 添加通道维度
+            if rgb_image.dim() == 3:
+                return nir.unsqueeze(0)
+            else:
+                return nir.unsqueeze(1)
         
-        if self.method == 'physical':
-            # 基于云物理光谱特性
-            # 云在 NIR (0.76-0.90μm) 具有高反射率，与红波段强相关
-            nir = self.coefficients['physical']['r'] * r + \
-                  self.coefficients['physical']['g'] * g + \
-                  self.coefficients['physical']['b'] * b
+        elif isinstance(rgb_image, np.ndarray):
+            # 处理 numpy array
+            if rgb_image.ndim == 3:
+                r, g, b = rgb_image[:, :, 0], rgb_image[:, :, 1], rgb_image[:, :, 2]
+            else:
+                raise ValueError(f"Expected 3 dim numpy array, got {rgb_image.ndim}")
             
-        elif self.method == 'vegetation':
-            # 植被指数启发: NIR ≈ (R + G) / 2 + α * (G - R)
-            # 利用绿波段与红波段的差异来估算近红外反射率
-            base = (r + g) / 2
-            diff = torch.abs(g - r) * 0.3
-            nir = base + diff
+            if self.method == 'physical':
+                nir = 0.7 * r + 0.25 * g + 0.05 * b
+            elif self.method == 'vegetation':
+                nir = 0.6 * r + 0.4 * g - 0.1 * b
+                nir = np.clip(nir, 0, 1)
+            elif self.method == 'enhanced':
+                luminance = 0.299 * r + 0.587 * g + 0.114 * b
+                nir = 0.5 * r + 0.3 * g + 0.2 * luminance
+            elif self.method == 'weighted':
+                red_weight = 1 / (1 + np.exp(-(r - 0.5) * 4))
+                nir = red_weight * (0.8 * r + 0.2 * g) + (1 - red_weight) * (0.5 * r + 0.3 * g + 0.2 * b)
+            else:
+                raise ValueError(f"Unknown NIR method: {self.method}")
             
-        elif self.method == 'enhanced':
-            # 增强型: 结合局部对比度
-            nir = self.coefficients['enhanced']['r'] * r + \
-                  self.coefficients['enhanced']['g'] * g + \
-                  self.coefficients['enhanced']['b'] * b
-            # 增加局部方差增强云的边缘
-            local_mean = torch.nn.functional.avg_pool2d(
-                nir.unsqueeze(0).unsqueeze(0), 
-                kernel_size=5, stride=1, padding=2
-            ).squeeze()
-            variance = (nir - local_mean).abs() * 0.2
-            nir = nir + variance
+            nir = nir * self.gain
+            nir = np.clip(nir, 0, 1)
             
-        elif self.method == 'weighted':
-            # 简单加权
-            nir = self.coefficients['weighted']['r'] * r + \
-                  self.coefficients['weighted']['g'] * g + \
-                  self.coefficients['weighted']['b'] * b
+            return nir[:, :, np.newaxis]  # [H, W, 1]
         
         else:
-            raise ValueError(f"Unknown NIR method: {self.method}")
+            raise TypeError(f"Expected torch.Tensor or np.ndarray, got {type(rgb_image)}")
+
+
+class CloudAugmentation:
+    """
+    云分割数据增强
+    
+    支持随机裁剪、翻转、亮度/对比度调整、高斯噪声等
+    特别优化支持 NIR 通道的数据增强
+    """
+    
+    def __init__(self, config: dict):
+        self.config = config
+        self.enabled = config.get('enabled', False)
+        self.use_nir = config.get('use_nir', True)
+        self.nir_method = config.get('nir_method', 'physical')
+        self.nir_gain = config.get('nir_gain', 1.1)
         
-        # 应用增益和偏移
-        nir = nir * self.gain + self.offset
+        # 如果启用NIR，初始化生成器
+        if self.use_nir:
+            self.nir_generator = NIRGenerator(method=self.nir_method, gain=self.nir_gain)
+        else:
+            self.nir_generator = None
         
-        # 裁剪到有效范围
-        nir = torch.clamp(nir, 0.0, 1.0)
+        if self.enabled:
+            print(f"[CloudAugmentation] Enabled with NIR={self.use_nir}")
+    
+    def __call__(self, image, mask, mode='train'):
+        """
+        应用数据增强
         
-        return nir.unsqueeze(0)  # [1, H, W]
+        Args:
+            image: PIL.Image (RGB) or torch.Tensor [C, H, W]
+            mask: PIL.Image (L) or torch.Tensor [H, W]
+            mode: 'train' or 'val'
+            
+        Returns:
+            image: torch.Tensor [C, H, W] (如果 use_nir=True, C=4)
+            mask: torch.Tensor [H, W]
+        """
+        # 转换为 Tensor
+        if isinstance(image, Image.Image):
+            image = T.ToTensor()(image)  # [3, H, W]
+        if isinstance(mask, Image.Image):
+            mask = torch.from_numpy(np.array(mask)).long()
+        
+        if not self.enabled or mode != 'train':
+            # 验证模式或无增强：直接添加 NIR（如果需要）
+            if self.use_nir and self.nir_generator is not None and image.shape[0] == 3:
+                nir = self.nir_generator(image)  # [1, H, W]
+                image = torch.cat([image, nir], dim=0)  # [4, H, W]
+            return image, mask
+        
+        # 训练模式的数据增强
+        # 1. 随机裁剪
+        crop_size = self.config.get('random_crop_size', None)
+        if crop_size is not None:
+            i, j, h, w = T.RandomCrop.get_params(image, output_size=crop_size)
+            image = TF.crop(image, i, j, h, w)
+            mask = TF.crop(mask.unsqueeze(0), i, j, h, w).squeeze(0)
+        
+        # 2. 随机水平翻转
+        if torch.rand(1) < self.config.get('horizontal_flip', 0.5):
+            image = TF.hflip(image)
+            mask = TF.hflip(mask.unsqueeze(0)).squeeze(0)
+        
+        # 3. 随机垂直翻转
+        if torch.rand(1) < self.config.get('vertical_flip', 0.5):
+            image = TF.vflip(image)
+            mask = TF.vflip(mask.unsqueeze(0)).squeeze(0)
+        
+        # 4. 亮度调整
+        brightness = self.config.get('brightness', 0)
+        if brightness > 0:
+            brightness_factor = torch.empty(1).uniform_(1 - brightness, 1 + brightness).item()
+            image = TF.adjust_brightness(image, brightness_factor)
+        
+        # 5. 对比度调整
+        contrast = self.config.get('contrast', 0)
+        if contrast > 0:
+            contrast_factor = torch.empty(1).uniform_(1 - contrast, 1 + contrast).item()
+            image = TF.adjust_contrast(image, contrast_factor)
+        
+        # 6. 高斯噪声
+        noise_std = self.config.get('gaussian_noise', 0)
+        if noise_std > 0:
+            noise = torch.randn_like(image) * noise_std
+            image = image + noise
+            image = torch.clamp(image, 0, 1)
+        
+        # 7. 添加 NIR 通道
+        if self.use_nir and self.nir_generator is not None and image.shape[0] == 3:
+            nir = self.nir_generator(image)  # [1, H, W]
+            image = torch.cat([image, nir], dim=0)  # [4, H, W]
+        
+        return image, mask
+
+
+def get_data_loaders(config: dict, dev_run: bool = False):
+    """
+    创建标准的数据加载器（单数据集模式）
+    
+    Args:
+        config: 配置字典，包含 data 和 training 配置
+        dev_run: 是否为开发测试模式（限制数据量）
+        
+    Returns:
+        train_loader, val_loader, test_loader
+    """
+    data_cfg = config['data']
+    train_cfg = config['training']
+    
+    # 数据路径
+    train_path = data_cfg.get('train_data_path')
+    val_path = data_cfg.get('val_data_path')
+    test_path = data_cfg.get('test_data_path')
+    
+    # 数据集参数
+    use_nir = data_cfg.get('use_nir', True)
+    target_size = data_cfg.get('target_size', (512, 512))
+    nir_method = data_cfg.get('nir_method', 'physical')
+    nir_gain = data_cfg.get('nir_gain', 1.1)
+    
+    # 数据增强配置
+    aug_config = train_cfg.get('augmentation', {'enabled': False})
+    aug_config['use_nir'] = use_nir
+    aug_config['nir_method'] = nir_method
+    aug_config['nir_gain'] = nir_gain
+    transform = CloudAugmentation(aug_config)
+    
+    # 归一化器
+    normalization_cfg = data_cfg.get('normalization', {})
+    normalizer = ImageNormalizer(
+        method=normalization_cfg.get('method', 'percentile'),
+        bit_depth=data_cfg.get('target_bit_depth', 8)
+    )
+    
+    # 创建数据集
+    train_dataset = None
+    val_dataset = None
+    test_dataset = None
+    
+    if train_path:
+        train_image_dir = os.path.join(train_path, 'images')
+        train_mask_dir = os.path.join(train_path, 'masks')
+        train_dataset = CloudSegmentationDataset(
+            image_dir=train_image_dir,
+            mask_dir=train_mask_dir,
+            mode='train',
+            transform=transform,
+            target_size=target_size,
+            use_nir=use_nir,
+            nir_method=nir_method,
+            nir_gain=nir_gain
+        )
+    
+    if val_path:
+        val_image_dir = os.path.join(val_path, 'images')
+        val_mask_dir = os.path.join(val_path, 'masks')
+        val_dataset = CloudSegmentationDataset(
+            image_dir=val_image_dir,
+            mask_dir=val_mask_dir,
+            mode='val',
+            transform=None,  # 验证集不使用数据增强
+            target_size=target_size,
+            use_nir=use_nir,
+            nir_method=nir_method,
+            nir_gain=nir_gain
+        )
+    
+    if test_path:
+        test_image_dir = os.path.join(test_path, 'images')
+        test_mask_dir = os.path.join(test_path, 'masks')
+        test_dataset = CloudSegmentationDataset(
+            image_dir=test_image_dir,
+            mask_dir=test_mask_dir,
+            mode='test',
+            transform=None,
+            target_size=target_size,
+            use_nir=use_nir,
+            nir_method=nir_method,
+            nir_gain=nir_gain
+        )
+    
+    # Dev run: 限制数据集大小
+    if dev_run and train_dataset:
+        from torch.utils.data import Subset
+        train_samples = min(64, len(train_dataset))
+        train_dataset = Subset(train_dataset, range(train_samples))
+        print(f"[Dev Run] Limited train: {train_samples} samples")
+    
+    # 创建 DataLoader
+    num_workers = train_cfg.get('num_workers', 4)
+    batch_size = train_cfg.get('batch_size', 8)
+    
+    # 4通道需要调整 batch_size
+    if use_nir and batch_size > 4:
+        adjusted = max(4, batch_size // 2)
+        print(f"[DataLoader] Adjusted batch_size: {batch_size} -> {adjusted} (4-channel)")
+        batch_size = adjusted
+    
+    train_loader = None
+    val_loader = None
+    test_loader = None
+    
+    if train_dataset:
+        train_loader = DataLoader(
+            train_dataset,
+            batch_size=batch_size,
+            shuffle=True,
+            num_workers=num_workers,
+            pin_memory=True,
+            drop_last=True
+        )
+    
+    if val_dataset:
+        val_loader = DataLoader(
+            val_dataset,
+            batch_size=batch_size,
+            shuffle=False,
+            num_workers=num_workers,
+            pin_memory=True
+        )
+    
+    if test_dataset:
+        test_loader = DataLoader(
+            test_dataset,
+            batch_size=1,
+            shuffle=False,
+            num_workers=num_workers,
+            pin_memory=True
+        )
+    
+    print(f"[DataLoader] Created: train={len(train_dataset) if train_dataset else 0}, "
+          f"val={len(val_dataset) if val_dataset else 0}, "
+          f"test={len(test_dataset) if test_dataset else 0}")
+    
+    return train_loader, val_loader, test_loader
 
 
 class CloudSegmentationDataset(Dataset):
@@ -236,251 +601,6 @@ class CloudSegmentationDataset(Dataset):
         }
 
 
-class CloudAugmentation:
-    """
-    云分割数据增强 (支持 RGB+NIR 四通道)
-    包含空间变换、颜色变换、噪声等
-    """
-    
-    def __init__(self, config: dict):
-        self.config = config
-        self.enabled = config.get('enabled', True)
-        
-        if not self.enabled:
-            return
-        
-        self.crop_size = config.get('random_crop_size', [512, 512])
-        self.hflip_prob = config.get('horizontal_flip', 0.5)
-        self.vflip_prob = config.get('vertical_flip', 0.5)
-        self.brightness = config.get('brightness', 0.2)
-        self.contrast = config.get('contrast', 0.2)
-        self.noise_std = config.get('gaussian_noise', 0.01)
-        self.use_nir = config.get('use_nir', True)
-        
-        # NIR 生成器（用于 val/test 模式）
-        if self.use_nir:
-            nir_method = config.get('nir_method', 'physical')
-            nir_gain = config.get('nir_gain', 1.1)
-            self.nir_generator = NIRGenerator(method=nir_method, gain=nir_gain)
-        else:
-            self.nir_generator = None
-    
-    def __call__(self, image: Image.Image, mask: Image.Image, mode: str):
-        """
-        Args:
-            image: PIL Image (RGB)
-            mask: PIL Image (L)
-            mode: 'train' 或 'val'
-            
-        Returns:
-            image: Tensor [3, H, W] 或 [4, H, W] (RGB or RGB+NIR)
-            mask: Tensor [H, W]
-        """
-        if not self.enabled or mode != 'train':
-            # 验证模式：调整尺寸并进行必要的预处理
-            image = TF.resize(image, self.crop_size)
-            mask = TF.resize(mask, self.crop_size, interpolation=TF.InterpolationMode.NEAREST)
-            image = T.ToTensor()(image)  # [3, H, W]
-            mask = torch.from_numpy(np.array(mask)).long()
-            
-            # 生成 NIR 通道
-            if self.use_nir and self.nir_generator is not None:
-                nir = self.nir_generator(image)  # [1, H, W]
-                image = torch.cat([image, nir], dim=0)  # [4, H, W]
-            
-            return image, mask
-        
-        # 训练模式：应用数据增强
-        
-        # 1. 随机裁剪
-        i, j, h, w = T.RandomCrop.get_params(
-            image, 
-            output_size=(self.crop_size[0], self.crop_size[1])
-        )
-        image = TF.crop(image, i, j, h, w)
-        mask = TF.crop(mask, i, j, h, w)
-        
-        # 2. 随机水平翻转
-        if torch.rand(1) < self.hflip_prob:
-            image = TF.hflip(image)
-            mask = TF.hflip(mask)
-        
-        # 3. 随机垂直翻转
-        if torch.rand(1) < self.vflip_prob:
-            image = TF.vflip(image)
-            mask = TF.vflip(mask)
-        
-        # 4. 颜色抖动（仅应用于图像 RGB 通道）
-        if self.brightness > 0:
-            brightness_factor = 1.0 + (torch.rand(1).item() - 0.5) * 2 * self.brightness
-            image = TF.adjust_brightness(image, brightness_factor)
-        
-        if self.contrast > 0:
-            contrast_factor = 1.0 + (torch.rand(1).item() - 0.5) * 2 * self.contrast
-            image = TF.adjust_contrast(image, contrast_factor)
-        
-        # 5. 转换为Tensor
-        image = T.ToTensor()(image)  # [3, H, W]
-        mask = torch.from_numpy(np.array(mask)).long()
-        
-        # 6. 添加高斯噪声（模拟传感器噪声，仅应用于 RGB）
-        if self.noise_std > 0:
-            noise = torch.randn_like(image) * self.noise_std
-            image = image + noise
-            image = torch.clamp(image, 0, 1)
-        
-        # 7. 生成 NIR 通道（基于增强后的 RGB）
-        if self.use_nir and self.nir_generator is not None:
-            nir = self.nir_generator(image)  # [1, H, W]
-            image = torch.cat([image, nir], dim=0)  # [4, H, W]
-        
-        return image, mask
-
-
-def get_data_loaders(config: dict, dev_run: bool = False):
-    """
-    创建数据加载器 (支持 RGB+NIR 四通道和原生 4 通道高比特数据集)
-    
-    Args:
-        config: 配置字典
-        dev_run: 如果为True，只使用少量样本进行快速开发测试
-        
-    Returns:
-        train_loader, val_loader, test_loader
-    """
-    data_cfg = config['data']
-    train_cfg = config['training']
-    
-    # 检测数据集类型
-    dataset_type = data_cfg.get('dataset_type', 'standard')
-    use_native_4ch = data_cfg.get('native_4channel', False)
-    
-    # NIR 配置
-    use_nir = data_cfg.get('use_nir', True)
-    nir_method = data_cfg.get('nir_method', 'physical')
-    nir_gain = data_cfg.get('nir_gain', 1.1)
-    
-    if use_nir:
-        print(f"[DataLoader] NIR enabled: method={nir_method}, gain={nir_gain}")
-    
-    # 数据增强配置
-    aug_config = train_cfg.get('augmentation', {'enabled': False})
-    aug_config['use_nir'] = use_nir
-    aug_config['nir_method'] = nir_method
-    aug_config['nir_gain'] = nir_gain
-    transform = CloudAugmentation(aug_config)
-    
-    # 根据数据集类型创建数据集
-    if dataset_type == 'cloud_cover' or use_native_4ch:
-        # 原生 4 通道高比特数据集
-        print(f"[DataLoader] Using native 4-channel dataset: {dataset_type}")
-        
-        train_dataset = CloudCoverDataset(
-            data_root=data_cfg['train_data_path'],
-            split='train',
-            transform=transform,
-            bit_depth=data_cfg.get('bit_depth', None),
-            use_all_bands=data_cfg.get('use_all_bands', True)
-        )
-        
-        val_dataset = CloudCoverDataset(
-            data_root=data_cfg['val_data_path'],
-            split='val',
-            transform=transform,
-            bit_depth=data_cfg.get('bit_depth', None),
-            use_all_bands=data_cfg.get('use_all_bands', True)
-        )
-        
-        test_dataset = CloudCoverDataset(
-            data_root=data_cfg['test_data_path'],
-            split='test',
-            transform=transform,
-            bit_depth=data_cfg.get('bit_depth', None),
-            use_all_bands=data_cfg.get('use_all_bands', True)
-        )
-    else:
-        # 标准 3 通道数据集（RGB+NIR 生成）
-        train_dataset = CloudSegmentationDataset(
-            image_dir=os.path.join(data_cfg['train_data_path'], 'images'),
-            mask_dir=os.path.join(data_cfg['train_data_path'], 'masks'),
-            mode='train',
-            transform=transform,
-            use_nir=use_nir,
-            nir_method=nir_method,
-            nir_gain=nir_gain
-        )
-        
-        val_dataset = CloudSegmentationDataset(
-            image_dir=os.path.join(data_cfg['val_data_path'], 'images'),
-            mask_dir=os.path.join(data_cfg['val_data_path'], 'masks'),
-            mode='val',
-            transform=transform,
-            use_nir=use_nir,
-            nir_method=nir_method,
-            nir_gain=nir_gain
-        )
-        
-        test_dataset = CloudSegmentationDataset(
-            image_dir=os.path.join(data_cfg['test_data_path'], 'images'),
-            mask_dir=os.path.join(data_cfg['test_data_path'], 'masks'),
-            mode='test',
-            transform=transform,
-            use_nir=use_nir,
-            nir_method=nir_method,
-            nir_gain=nir_gain
-        )
-    
-    # Dev run: limit dataset size for quick testing
-    if dev_run:
-        from torch.utils.data import Subset
-        train_samples = min(64, len(train_dataset))
-        val_samples = min(16, len(val_dataset))
-        test_samples = min(16, len(test_dataset))
-        train_dataset = Subset(train_dataset, range(train_samples))
-        val_dataset = Subset(val_dataset, range(val_samples))
-        test_dataset = Subset(test_dataset, range(test_samples))
-        print(f"[Dev Run] Limited datasets: train={train_samples}, val={val_samples}, test={test_samples}")
-
-    # DataLoader
-    num_workers = train_cfg.get('num_workers', 4)
-    batch_size = train_cfg.get('batch_size', 8)
-    
-    # 根据通道数调整 batch_size（4通道比3通道占用更多显存）
-    if use_nir:
-        # 如果 batch_size > 4，建议减小以适应更大的通道数
-        if batch_size > 4:
-            adjusted_batch_size = max(4, batch_size // 2)
-            print(f"[DataLoader] Adjusted batch_size: {batch_size} -> {adjusted_batch_size} (4-channel)")
-            batch_size = adjusted_batch_size
-    
-    train_loader = DataLoader(
-        train_dataset,
-        batch_size=batch_size,
-        shuffle=True,
-        num_workers=num_workers,
-        pin_memory=True,
-        drop_last=True
-    )
-    
-    val_loader = DataLoader(
-        val_dataset,
-        batch_size=batch_size,
-        shuffle=False,
-        num_workers=num_workers,
-        pin_memory=True
-    )
-    
-    test_loader = DataLoader(
-        test_dataset,
-        batch_size=1,  # 测试时使用batch_size=1以支持任意尺寸
-        shuffle=False,
-        num_workers=num_workers,
-        pin_memory=True
-    )
-    
-    return train_loader, val_loader, test_loader
-
-
 class InferenceDataset(Dataset):
     """
     推理专用数据集 - 支持任意尺寸图像 (RGB+NIR 四通道)
@@ -519,400 +639,6 @@ class InferenceDataset(Dataset):
             'image': image,
             'filename': os.path.basename(img_path),
             'original_size': original_size
-        }
-
-
-class CloudCoverDataset(Dataset):
-    """
-    原生 4 通道 (RGB+NIR) 高比特位宽云分割数据集
-    
-    专为 cloud_cover_detection 数据集设计:
-    - 支持 4 通道原生图像 (R, G, B, NIR)
-    - 支持 16-bit/32-bit 高比特位宽
-    - 自动归一化到 [0, 1] 范围
-    - 支持 TIFF/PNG 等格式
-    
-    数据集结构:
-    cloud_cover_detection/
-    ├── train/
-    │   ├── images/     # 4通道高比特图像
-    │   └── masks/      # 单通道标注
-    ├── val/
-    └── test/
-    
-    Args:
-        data_root: 数据集根目录 (如 '../Data/cloud_cover_detection')
-        split: 'train', 'val', 或 'test'
-        transform: 数据增强变换
-        target_size: 目标尺寸
-        bit_depth: 输入图像位深 (16, 32, None=自动检测)
-        use_all_bands: 是否使用所有4通道 (False则只用RGB)
-    """
-    
-    def __init__(
-        self,
-        data_root: str,
-        split: str = 'train',
-        transform=None,
-        target_size: tuple = (512, 512),
-        bit_depth: int = None,
-        use_all_bands: bool = True
-    ):
-        self.data_root = data_root
-        self.split = split
-        self.transform = transform
-        self.target_size = target_size
-        self.bit_depth = bit_depth
-        self.use_all_bands = use_all_bands
-        
-        # 图像和标注目录
-        self.image_dir = os.path.join(data_root, split, 'images')
-        self.mask_dir = os.path.join(data_root, split, 'masks')
-        
-        # 获取图像列表
-        self.image_paths = []
-        for ext in ['*.tif', '*.tiff', '*.png', '*.jpg']:
-            self.image_paths.extend(glob.glob(os.path.join(self.image_dir, ext)))
-        self.image_paths.sort()
-        
-        # 验证 mask 存在性
-        self.valid_indices = []
-        for i, img_path in enumerate(self.image_paths):
-            img_name = os.path.basename(img_path)
-            name_wo_ext = os.path.splitext(img_name)[0]
-            
-            mask_candidates = [
-                os.path.join(self.mask_dir, img_name),
-                os.path.join(self.mask_dir, name_wo_ext + '.png'),
-                os.path.join(self.mask_dir, name_wo_ext + '.tif'),
-            ]
-            
-            if any(os.path.exists(m) for m in mask_candidates):
-                self.valid_indices.append(i)
-        
-        self.image_paths = [self.image_paths[i] for i in self.valid_indices]
-        
-        print(f"[CloudCoverDataset] {split}: {len(self.image_paths)} valid samples")
-        if use_all_bands:
-            print(f"[CloudCoverDataset] Using 4 channels (R+G+B+NIR)")
-        else:
-            print(f"[CloudCoverDataset] Using 3 channels (R+G+B), skipping native NIR")
-    
-    def __len__(self):
-        return len(self.image_paths)
-    
-    def _load_multichannel_image(self, path: str) -> np.ndarray:
-        """
-        加载多通道高比特位宽图像
-        
-        Returns:
-            image: [H, W, C] numpy array, float32 in [0, 1]
-        """
-        # 使用 imageio 或 tifffile 加载高比特图像
-        try:
-            import tifffile
-            img = tifffile.imread(path)
-        except ImportError:
-            # 降级使用 PIL
-            img = np.array(Image.open(path))
-        
-        # 处理不同维度格式
-        if img.ndim == 2:
-            # 单通道，复制为4通道
-            img = np.stack([img] * 4, axis=-1)
-        elif img.ndim == 3:
-            if img.shape[0] <= 4 and img.shape[0] < img.shape[-1]:
-                # [C, H, W] 格式，转为 [H, W, C]
-                img = np.transpose(img, (1, 2, 0))
-        
-        # 确保至少3通道
-        if img.shape[-1] < 3:
-            if img.shape[-1] == 1:
-                img = np.repeat(img, 3, axis=-1)
-        
-        # 检测位深并归一化
-        if self.bit_depth is not None:
-            max_val = (1 << self.bit_depth) - 1
-        else:
-            # 自动检测
-            if img.dtype == np.uint8:
-                max_val = 255
-            elif img.dtype == np.uint16:
-                max_val = 65535
-            elif img.dtype == np.float32 or img.dtype == np.float64:
-                max_val = 1.0
-                if img.max() > 1:
-                    max_val = img.max()
-            else:
-                max_val = img.max()
-        
-        # 归一化到 [0, 1]
-        img = img.astype(np.float32) / max_val
-        
-        # 确保4通道 (RGB+NIR)
-        if self.use_all_bands and img.shape[-1] >= 4:
-            img = img[:, :, :4]  # 取前4通道
-        elif self.use_all_bands and img.shape[-1] == 3:
-            # 只有3通道，需要生成NIR
-            print(f"Warning: {path} has only 3 channels, generating pseudo-NIR")
-            nir = 0.7 * img[:, :, 0] + 0.25 * img[:, :, 1] + 0.05 * img[:, :, 2]
-            nir = nir[:, :, np.newaxis]
-            img = np.concatenate([img, nir], axis=-1)
-        else:
-            # 只使用RGB
-            img = img[:, :, :3]
-        
-        return img
-    
-    def __getitem__(self, idx):
-        img_path = self.image_paths[idx]
-        img_name = os.path.basename(img_path)
-        name_wo_ext = os.path.splitext(img_name)[0]
-        
-        # 加载多通道图像 [H, W, C]
-        image_np = self._load_multichannel_image(img_path)
-        
-        # 加载 mask
-        mask_candidates = [
-            os.path.join(self.mask_dir, img_name),
-            os.path.join(self.mask_dir, name_wo_ext + '.png'),
-            os.path.join(self.mask_dir, name_wo_ext + '.tif'),
-        ]
-        
-        mask = None
-        for mask_path in mask_candidates:
-            if os.path.exists(mask_path):
-                mask = Image.open(mask_path).convert('L')
-                break
-        
-        if mask is None:
-            raise FileNotFoundError(f"Mask not found for {img_path}")
-        
-        # 二值化 mask
-        mask_np = np.array(mask)
-        mask_np = (mask_np > 127).astype(np.uint8)
-        
-        # 转为 PIL Image 以使用 transforms
-        image_pil = Image.fromarray((image_np[:, :, :3] * 255).astype(np.uint8))
-        mask_pil = Image.fromarray(mask_np)
-        
-        # 数据增强
-        if self.transform is not None:
-            # 注意：transform 返回的是 [C, H, W] tensor
-            if self.use_all_bands and image_np.shape[-1] == 4:
-                # 4通道情况：先转换RGB，然后合并原生NIR
-                image_rgb_pil = Image.fromarray((image_np[:, :, :3] * 255).astype(np.uint8))
-                image_tensor, mask_tensor = self.transform(image_rgb_pil, mask_pil, self.split)
-                
-                # 如果 transform 只返回了3通道，我们需要添加原生NIR
-                if image_tensor.shape[0] == 3:
-                    # 加载原生NIR通道
-                    nir_native = torch.from_numpy(image_np[:, :, 3]).float()
-                    nir_native = TF.resize(nir_native.unsqueeze(0), self.target_size)
-                    image_tensor = torch.cat([image_tensor, nir_native], dim=0)
-            else:
-                # 3通道情况
-                image_tensor, mask_tensor = self.transform(image_pil, mask_pil, self.split)
-        else:
-            # 默认变换
-            image_pil = image_pil.resize(self.target_size)
-            mask_pil = mask_pil.resize(self.target_size, Image.NEAREST)
-            
-            image_tensor = T.ToTensor()(image_pil)  # [3, H, W]
-            
-            # 添加原生NIR（如果是4通道模式）
-            if self.use_all_bands and image_np.shape[-1] == 4:
-                nir_resized = TF.resize(
-                    Image.fromarray((image_np[:, :, 3] * 255).astype(np.uint8)),
-                    self.target_size
-                )
-                nir_tensor = T.ToTensor()(nir_resized)  # [1, H, W]
-                image_tensor = torch.cat([image_tensor, nir_tensor], dim=0)
-            
-            mask_tensor = torch.from_numpy(np.array(mask_pil)).long()
-        
-        return {
-            'image': image_tensor,
-            'mask': mask_tensor,
-            'filename': img_name,
-            'native_nir': self.use_all_bands and image_np.shape[-1] == 4
-        }
-
-
-class MultiDatasetSampler:
-    """
-    多数据集采样器 - 用于快速验证模型在不同数据集的效果
-    
-    从多个数据集中分别采样固定数量的样本，组合成一个验证集
-    
-    Example:
-        sampler = MultiDatasetSampler({
-            'RICE2': '../Data/RICE2',
-            'HRC_WHU': '../Data/HRC_WHU', 
-            'cloud_cover': '../Data/cloud_cover_detection'
-        }, samples_per_dataset=20)
-        
-        val_loader = sampler.get_validation_loader(batch_size=4)
-    """
-    
-    def __init__(
-        self,
-        dataset_paths: dict,
-        samples_per_dataset: int = 20,
-        target_size: tuple = (512, 512),
-        use_nir: bool = True,
-        transform=None
-    ):
-        """
-        Args:
-            dataset_paths: 字典，{数据集名称: 路径}
-            samples_per_dataset: 每个数据集采样的样本数
-            target_size: 目标尺寸
-            use_nir: 是否使用NIR
-            transform: 数据增强
-        """
-        self.dataset_paths = dataset_paths
-        self.samples_per_dataset = samples_per_dataset
-        self.target_size = target_size
-        self.use_nir = use_nir
-        self.transform = transform
-        
-        self.samples = []  # [(dataset_name, image_path, mask_path), ...]
-        
-        for dataset_name, path in dataset_paths.items():
-            sampled = self._sample_dataset(dataset_name, path)
-            self.samples.extend(sampled)
-            print(f"[MultiDatasetSampler] {dataset_name}: sampled {len(sampled)} images")
-        
-        print(f"[MultiDatasetSampler] Total: {len(self.samples)} samples")
-    
-    def _sample_dataset(self, name: str, path: str):
-        """从单个数据集采样"""
-        samples = []
-        
-        # 尝试不同的目录结构
-        possible_dirs = [
-            (os.path.join(path, 'val', 'images'), os.path.join(path, 'val', 'masks')),
-            (os.path.join(path, 'test', 'images'), os.path.join(path, 'test', 'masks')),
-            (os.path.join(path, 'images'), os.path.join(path, 'masks')),
-        ]
-        
-        image_dir = None
-        mask_dir = None
-        
-        for img_dir, msk_dir in possible_dirs:
-            if os.path.exists(img_dir) and os.path.exists(msk_dir):
-                image_dir = img_dir
-                mask_dir = msk_dir
-                break
-        
-        if image_dir is None:
-            print(f"Warning: Could not find valid image/mask dirs for {name}")
-            return []
-        
-        # 获取所有图像
-        image_paths = []
-        for ext in ['*.jpg', '*.png', '*.tif', '*.tiff']:
-            image_paths.extend(glob.glob(os.path.join(image_dir, ext)))
-        
-        image_paths.sort()
-        
-        # 验证并收集有效样本
-        for img_path in image_paths:
-            img_name = os.path.basename(img_path)
-            name_wo_ext = os.path.splitext(img_name)[0]
-            
-            mask_candidates = [
-                os.path.join(mask_dir, img_name),
-                os.path.join(mask_dir, name_wo_ext + '.png'),
-                os.path.join(mask_dir, name_wo_ext + '.jpg'),
-                os.path.join(mask_dir, name_wo_ext + '.tif'),
-            ]
-            
-            for mask_path in mask_candidates:
-                if os.path.exists(mask_path):
-                    samples.append((name, img_path, mask_path))
-                    break
-        
-        # 随机采样
-        if len(samples) > self.samples_per_dataset:
-            import random
-            samples = random.sample(samples, self.samples_per_dataset)
-        
-        return samples
-    
-    def get_validation_loader(self, batch_size: int = 4, num_workers: int = 2):
-        """
-        获取验证数据加载器
-        
-        Returns:
-            DataLoader that yields batches with 'dataset' key indicating source
-        """
-        dataset = MultiDatasetValidationSet(
-            self.samples,
-            target_size=self.target_size,
-            use_nir=self.use_nir,
-            transform=self.transform
-        )
-        
-        loader = DataLoader(
-            dataset,
-            batch_size=batch_size,
-            shuffle=False,
-            num_workers=num_workers,
-            pin_memory=True
-        )
-        
-        return loader
-
-
-class MultiDatasetValidationSet(Dataset):
-    """内部类：多数据集验证集"""
-    
-    def __init__(self, samples, target_size, use_nir, transform):
-        self.samples = samples
-        self.target_size = target_size
-        self.use_nir = use_nir
-        self.transform = transform
-        
-        if use_nir:
-            self.nir_generator = NIRGenerator()
-        else:
-            self.nir_generator = None
-    
-    def __len__(self):
-        return len(self.samples)
-    
-    def __getitem__(self, idx):
-        dataset_name, img_path, mask_path = self.samples[idx]
-        
-        # 加载图像
-        image = Image.open(img_path).convert('RGB')
-        
-        # 加载 mask
-        mask = Image.open(mask_path).convert('L')
-        mask_np = np.array(mask)
-        mask_np = (mask_np > 127).astype(np.uint8)
-        mask = Image.fromarray(mask_np)
-        
-        # 数据增强
-        if self.transform is not None:
-            image, mask = self.transform(image, mask, 'val')
-        else:
-            image = image.resize(self.target_size)
-            mask = mask.resize(self.target_size, Image.NEAREST)
-            image = T.ToTensor()(image)
-            mask = torch.from_numpy(np.array(mask)).long()
-            
-            if self.use_nir and self.nir_generator is not None:
-                nir = self.nir_generator(image)
-                image = torch.cat([image, nir], dim=0)
-        
-        return {
-            'image': image,
-            'mask': mask,
-            'filename': os.path.basename(img_path),
-            'dataset': dataset_name  # 标识数据来源
         }
 
 
@@ -956,7 +682,8 @@ class UnifiedDataset(Dataset):
         target_channels: int = 4,
         target_bit_depth: int = 16,
         transform=None,
-        mode: str = 'train'
+        mode: str = 'train',
+        normalizer=None
     ):
         """
         Args:
@@ -966,6 +693,7 @@ class UnifiedDataset(Dataset):
             target_bit_depth: 目标位深 (8 或 16)
             transform: 数据增强
             mode: 'train', 'val', 或 'test'
+            normalizer: 图像归一化器 (ImageNormalizer 实例)
         """
         self.datasets = datasets
         self.target_channels = target_channels
@@ -973,6 +701,13 @@ class UnifiedDataset(Dataset):
         self.transform = transform
         self.mode = mode
         self.use_nir = target_channels == 4
+        
+        # 初始化图像归一化器
+        if normalizer is None:
+            # 默认使用百分位数归一化（业界推荐）
+            self.normalizer = ImageNormalizer(method='percentile', bit_depth=target_bit_depth)
+        else:
+            self.normalizer = normalizer
         
         # 初始化 NIR 生成器（用于 3 通道数据集）
         if self.use_nir:
@@ -999,10 +734,28 @@ class UnifiedDataset(Dataset):
               f"{target_channels}ch, {target_bit_depth}bit, mode={mode}")
     
     def _collect_dataset_samples(self, name, path, ds_type, bit_depth, use_all_bands):
-        """收集单个数据集的样本"""
+        """
+        收集单个数据集的样本
+        
+        支持两种数据结构:
+        1. standard 类型:
+           - images/image.jpg, masks/mask.png
+           - train/images/image.jpg, train/masks/mask.png
+        
+        2. cloud_cover 类型 (Sentinel-2 格式):
+           - train_features/<sample_id>/B02.tif (Blue)
+           - train_features/<sample_id>/B03.tif (Green)
+           - train_features/<sample_id>/B04.tif (Red)
+           - train_features/<sample_id>/B08.tif (NIR)
+           - train_labels/<sample_id>.tif
+        """
         samples = []
         
-        # 尝试不同的目录结构
+        # cloud_cover 类型特殊处理
+        if ds_type == 'cloud_cover':
+            return self._collect_cloud_cover_samples(name, path, bit_depth, use_all_bands)
+        
+        # standard 类型的标准目录结构
         possible_dirs = [
             (os.path.join(path, 'images'), os.path.join(path, 'masks')),
             (os.path.join(path, 'train', 'images'), os.path.join(path, 'train', 'masks')),
@@ -1048,69 +801,202 @@ class UnifiedDataset(Dataset):
         
         return samples
     
+    def _collect_cloud_cover_samples(self, name, path, bit_depth, use_all_bands):
+        """
+        收集 cloud_cover 类型的样本（Sentinel-2 格式）
+        
+        结构:
+        - train_features/<sample_id>/B02.tif (Blue)
+        - train_features/<sample_id>/B03.tif (Green)
+        - train_features/<sample_id>/B04.tif (Red)
+        - train_features/<sample_id>/B08.tif (NIR)
+        - train_labels/<sample_id>.tif
+        """
+        samples = []
+        
+        # cloud_cover 类型的标准路径
+        feature_dir = os.path.join(path, 'train_features')
+        label_dir = os.path.join(path, 'train_labels')
+        
+        if not os.path.exists(feature_dir) or not os.path.exists(label_dir):
+            print(f"Warning: cloud_cover dataset requires 'train_features' and 'train_labels' dirs at {path}")
+            return []
+        
+        # 获取所有样本ID（子目录名）
+        sample_ids = []
+        for item in os.listdir(feature_dir):
+            item_path = os.path.join(feature_dir, item)
+            if os.path.isdir(item_path):
+                # 检查是否有必要的波段文件
+                has_all_bands = all(
+                    os.path.exists(os.path.join(item_path, f'band_{band}.tif')) or
+                    os.path.exists(os.path.join(item_path, f'B{band}.tif'))
+                    for band in ['02', '03', '04', '08']
+                )
+                if has_all_bands:
+                    sample_ids.append(item)
+        
+        sample_ids.sort()
+        
+        # 验证并收集
+        for sample_id in sample_ids:
+            feature_path = os.path.join(feature_dir, sample_id)
+            
+            # 检查标签文件
+            label_candidates = [
+                os.path.join(label_dir, f'{sample_id}.tif'),
+                os.path.join(label_dir, f'{sample_id}.png'),
+                os.path.join(label_dir, f'{sample_id}.jpg'),
+            ]
+            
+            label_path = None
+            for cand in label_candidates:
+                if os.path.exists(cand):
+                    label_path = cand
+                    break
+            
+            if label_path:
+                # 对于 cloud_cover 类型，img_path 是 feature 目录路径
+                # 实际的波段文件会在 _load_cloud_cover_image 中读取
+                samples.append((name, 'cloud_cover', bit_depth, use_all_bands, feature_path, label_path))
+        
+        return samples
+    
     def _load_and_unify_image(self, ds_type, bit_depth, use_all_bands, img_path):
         """
-        加载图像并统一通道和位宽
+        加载图像并统一通道和位宽，使用业界标准的归一化方法
         
+        支持任意位宽（8bit, 13bit, 16bit等），统一归一化到 [0, 1] 范围
+        通道补齐到统一的 4 通道（RGB+NIR）
+        
+        Args:
+            ds_type: 数据集类型 ('cloud_cover' 或 'standard')
+            bit_depth: 位宽 (8, 13, 16等)
+            use_all_bands: 是否使用所有波段（cloud_cover数据集）
+            img_path: 图像路径（standard类型是文件路径，cloud_cover类型是目录路径）
+            
         Returns:
             image: [C, H, W] tensor in [0, 1], dtype float32
         """
-        if ds_type == 'cloud_cover':
-            # 原生多通道高比特数据
-            try:
-                import tifffile
-                img = tifffile.imread(img_path)
-            except ImportError:
-                img = np.array(Image.open(img_path))
-            
-            # 处理维度
-            if img.ndim == 2:
-                img = np.stack([img] * 3, axis=-1)
-            elif img.ndim == 3 and img.shape[0] <= 4:
-                img = np.transpose(img, (1, 2, 0))
-            
-            # 归一化
-            if img.dtype == np.uint8:
-                img = img.astype(np.float32) / 255.0
-            elif img.dtype == np.uint16:
-                img = img.astype(np.float32) / 65535.0
-            elif img.dtype in [np.float32, np.float64]:
-                img = img.astype(np.float32)
-                if img.max() > 1:
-                    img = img / img.max()
-            
-            # 确保至少3通道
-            if img.shape[-1] < 3:
-                img = np.repeat(img, 3, axis=-1)
-            
-            # 处理第4通道
-            if self.target_channels == 4:
-                if img.shape[-1] >= 4 and use_all_bands:
-                    # 有原生 NIR
-                    img = img[:, :, :4]
-                else:
-                    # 需要生成 NIR
-                    r, g, b = img[:, :, 0], img[:, :, 1], img[:, :, 2]
-                    nir = 0.7 * r + 0.25 * g + 0.05 * b
-                    img = np.concatenate([img[:, :, :3], nir[:, :, np.newaxis]], axis=-1)
+        # 临时设置归一化器的位宽，用于计算最大值
+        original_bit_depth = self.normalizer.bit_depth
+        self.normalizer.set_bit_depth(bit_depth)
+        
+        try:
+            if ds_type == 'cloud_cover':
+                # cloud_cover 类型: img_path 是特征目录，包含 B02,B03,B04,B08
+                img = self._load_cloud_cover_image(img_path, bit_depth, use_all_bands)
             else:
-                img = img[:, :, :3]
+                # 标准 3 通道数据 (8bit)
+                img = Image.open(img_path).convert('RGB')
+                img = np.array(img, dtype=np.float32)
+                
+                # 8bit 数据 max_val = 255
+                max_val = (1 << bit_depth) - 1
+                img = img / max_val  # 先缩放到 [0, 1]
+                
+                # 使用业界标准的归一化方法
+                img = self.normalizer(img, per_image=True)
+                
+                # 如果需要 4 通道，生成 NIR
+                if self.target_channels == 4:
+                    r, g, b = img[:, :, 0], img[:, :, 1], img[:, :, 2]
+                    # 使用 NIRGenerator 的物理模型生成 NIR
+                    nir = 0.7 * r + 0.25 * g + 0.05 * b
+                    img = np.concatenate([img, nir[:, :, np.newaxis]], axis=-1)
             
-        else:
-            # 标准 3 通道 8bit 数据
-            img = Image.open(img_path).convert('RGB')
-            img = np.array(img).astype(np.float32) / 255.0
+            # 转为 tensor [C, H, W]
+            img_tensor = torch.from_numpy(np.transpose(img, (2, 0, 1))).float()
             
-            # 如果需要 4 通道，生成 NIR
-            if self.target_channels == 4:
-                r, g, b = img[:, :, 0], img[:, :, 1], img[:, :, 2]
+            return img_tensor
+        
+        finally:
+            # 恢复原来的位宽设置
+            self.normalizer.set_bit_depth(original_bit_depth)
+    
+    def _load_cloud_cover_image(self, feature_dir, bit_depth, use_all_bands):
+        """
+        加载 cloud_cover 类型的图像（Sentinel-2 格式）
+        
+        从 B02(Blue), B03(Green), B04(Red), B08(NIR) 合成 4 通道图像
+        
+        Args:
+            feature_dir: 特征目录路径 (如 train_features/<sample_id>/)
+            bit_depth: 位宽
+            use_all_bands: 是否使用原生 NIR (B08)
+            
+        Returns:
+            img: [H, W, C] numpy array in [0, 1]
+        """
+        # 波段文件映射（支持两种命名格式）
+        band_files = {
+            'B02': ['B02.tif', 'band_02.tif', 'B02.jp2', 'blue.tif'],
+            'B03': ['B03.tif', 'band_03.tif', 'B03.jp2', 'green.tif'],
+            'B04': ['B04.tif', 'band_04.tif', 'B04.jp2', 'red.tif'],
+            'B08': ['B08.tif', 'band_08.tif', 'B08.jp2', 'nir.tif'],
+        }
+        
+        # 加载各波段
+        bands = {}
+        for band_name, candidates in band_files.items():
+            band_path = None
+            for cand in candidates:
+                path = os.path.join(feature_dir, cand)
+                if os.path.exists(path):
+                    band_path = path
+                    break
+            
+            if band_path is None:
+                raise FileNotFoundError(f"Band {band_name} not found in {feature_dir}")
+            
+            # 读取波段图像
+            try:
+                band_img = np.array(Image.open(band_path))
+            except Exception as e:
+                raise RuntimeError(f"Failed to load {band_path}: {e}")
+            
+            bands[band_name] = band_img
+        
+        # 确保所有波段尺寸一致
+        target_shape = bands['B02'].shape
+        for band_name, band_img in bands.items():
+            if band_img.shape != target_shape:
+                raise ValueError(f"Band {band_name} shape {band_img.shape} doesn't match {target_shape}")
+        
+        # 合成 RGB+NIR (按照 Sentinel-2 波段定义)
+        # B04=Red, B03=Green, B02=Blue, B08=NIR
+        max_val = (1 << bit_depth) - 1
+        
+        red = bands['B04'].astype(np.float32) / max_val
+        green = bands['B03'].astype(np.float32) / max_val
+        blue = bands['B02'].astype(np.float32) / max_val
+        nir_native = bands['B08'].astype(np.float32) / max_val
+        
+        # 合成 RGB
+        rgb = np.stack([red, green, blue], axis=-1)  # [H, W, 3]
+        
+        # 应用归一化
+        rgb = self.normalizer(rgb, per_image=True)
+        
+        # 处理 NIR 通道
+        if self.target_channels == 4:
+            if use_all_bands:
+                # 使用原生 NIR (B08)
+                nir = self.normalizer(nir_native, per_image=True)
+                nir = nir[:, :, np.newaxis]  # [H, W, 1]
+            else:
+                # 从归一化后的 RGB 生成伪 NIR
+                r, g, b = rgb[:, :, 0], rgb[:, :, 1], rgb[:, :, 2]
                 nir = 0.7 * r + 0.25 * g + 0.05 * b
-                img = np.concatenate([img, nir[:, :, np.newaxis]], axis=-1)
+                nir = nir[:, :, np.newaxis]  # [H, W, 1]
+            
+            # 合并 RGB + NIR
+            img = np.concatenate([rgb, nir], axis=-1)  # [H, W, 4]
+        else:
+            # 只使用 RGB
+            img = rgb  # [H, W, 3]
         
-        # 转为 tensor [C, H, W]
-        img_tensor = torch.from_numpy(np.transpose(img, (2, 0, 1))).float()
-        
-        return img_tensor
+        return img
     
     def __len__(self):
         return len(self.samples)
@@ -1122,10 +1008,18 @@ class UnifiedDataset(Dataset):
         image = self._load_and_unify_image(ds_type, bit_depth, use_all_bands, img_path)
         
         # 加载 mask
-        mask = Image.open(mask_path).convert('L')
-        mask_np = np.array(mask)
-        mask_np = (mask_np > 127).astype(np.uint8)
+        mask_pil = Image.open(mask_path).convert('L')
+        mask_np = np.array(mask_pil)
+        # 二值化：适应不同格式的 mask（0-255 或 0-1）
+        # 如果最大值 <= 1，说明已经是二值；否则使用 127 作为阈值
+        if mask_np.max() <= 1:
+            mask_np = mask_np.astype(np.uint8)
+        else:
+            mask_np = (mask_np > 127).astype(np.uint8)
         mask_tensor = torch.from_numpy(mask_np).long()
+        
+        # 默认使用 tensor
+        mask = mask_tensor
         
         # 应用数据增强（如果需要）
         if self.transform is not None:
