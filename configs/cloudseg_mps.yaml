@@ -1,12 +1,12 @@
-# CloudSense-Net 基础配置
-# 适用于通用环境，使用统一数据集
+# CloudSense-Net MPS (Apple Silicon) 优化配置
+# 专为 Apple Silicon (M1/M2/M3) 优化的配置
 
 # ==================== 模型架构配置 ====================
 model:
-  name: "CloudSenseNet"
+  name: "CloudSenseNet_MPS"
   num_classes: 2
 
-  # 编码器选择
+  # 编码器选择 - MPS 上推荐 EfficientNet
   encoder:
     type: "efficientnet"
     enabled: true
@@ -31,23 +31,31 @@ model:
       out_channels: 256
       num_levels: 4
 
-  # 解码器选择
+  # 解码器选择 - SegFormer 轻量高效
   decoder:
     type: "segformer"
     enabled: true
     segformer:
       embed_dim: 256
 
-  # 辅助头
+  # 辅助头 - MPS 显存有限，建议禁用
   auxiliary_head:
     enabled: false
     loss_weight: 0.4
 
-# ==================== 训练配置 ====================
+# ==================== MPS 优化训练配置 ====================
 training:
+  # Apple Silicon 统一内存架构，但建议 batch_size 适中
+  # M1/M2 (8GB): batch_size=4
+  # M2 Pro (16GB): batch_size=8
+  # M2 Max (32GB): batch_size=16
   batch_size: 8
   num_epochs: 50
-  num_workers: 4
+  num_workers: 2  # MPS 推荐较少 workers
+  
+  # MPS 混合精度支持有限，建议禁用
+  amp:
+    enabled: false
 
   optimizer:
     type: "AdamW"
@@ -74,38 +82,29 @@ training:
     contrast: 0.2
     gaussian_noise: 0.01
 
-# ==================== 数据集配置 ====================
+# ==================== MPS 优化数据集配置 ====================
 data:
-  # 使用统一数据集
   multi_dataset: true
-  
-  # 统一数据集目录
   unified_data_dir: "../Data/Unified_Cloud_Dataset"
   
-  # 数据集列表
+  # MPS 建议从少量数据集开始
   datasets:
     - name: "hrcwhu"
     - name: "rice2"
     - name: "oncloudn"
-    - name: "cloud38"
-    - name: "cloud95"
   
-  # 数据统一配置
-  target_channels: 4      # 目标通道数：4 (RGB+NIR)
-  target_bit_depth: 16    # 目标位深：16bit
+  target_channels: 4
+  target_bit_depth: 16
   use_nir: true
   
-  # NIR 生成算法（用于从 RGB 生成 NIR 的数据集）
   nir_method: "physical"
   nir_gain: 1.1
   
-  # 归一化配置
   normalization:
     method: "percentile"
     lower_percentile: 1.0
     upper_percentile: 99.0
   
-  # Val/Test 分割配置
   val_test_split:
     enabled: true
     train_ratio: 0.75
@@ -124,7 +123,19 @@ inference:
 # ==================== 实验配置 ====================
 experiment:
   seed: 42
-  save_dir: "./experiments"
+  save_dir: "./experiments_mps"
   log_interval: 10
   val_interval: 1
   save_best_only: true
+
+# ==================== MPS 特定提示 ====================
+# 使用说明:
+# 1. 训练: python3 train.py --config configs/cloudseg_mps.yaml --device mps
+# 2. 评估: python3 eval.py --checkpoint experiments_mps/best_model.pth --device mps
+# 3. 推理: python3 inference.py --checkpoint experiments_mps/best_model.pth --device mps
+#
+# MPS 优化建议:
+# - 使用 --device auto 自动检测 MPS
+# - batch_size 根据 Mac 内存调整: M2(8GB)->4, M2 Pro(16GB)->8, M2 Max(32GB)->16
+# - 避免使用 Swin Transformer（在 MPS 上性能不佳）
+# - 推荐使用 ConvNeXt 或 EfficientNet

@@ -1,0 +1,144 @@
+# CloudSense-Net CUDA (NVIDIA GPU) 优化配置
+# 适用于 NVIDIA GPU 环境
+
+# ==================== 模型架构配置 ====================
+model:
+  name: "CloudSenseNet_CUDA"
+  num_classes: 2
+
+  # 编码器选择 - CUDA 上可使用更大的模型
+  encoder:
+    type: "efficientnet"
+    enabled: true
+    efficientnet:
+      model_name: "efficientnet_b4"  # CUDA 可用更大模型
+      pretrained: true
+      drop_path_rate: 0.2
+
+  # 语义增强模块
+  semantic_enhancement:
+    enabled: true
+    vocabulary_size: 2
+    patch_size: 16
+    embed_dim: 768
+    merge_stage: 0
+
+  # 特征融合层
+  fusion:
+    enabled: true
+    type: "fpn"
+    fpn:
+      out_channels: 256
+      num_levels: 4
+
+  # 解码器选择
+  decoder:
+    type: "segformer"
+    enabled: true
+    segformer:
+      embed_dim: 256
+
+  # 辅助头 - CUDA 可启用
+  auxiliary_head:
+    enabled: true
+    loss_weight: 0.4
+
+# ==================== CUDA 优化训练配置 ====================
+training:
+  # CUDA 批量大小可根据显存调整
+  # RTX 3060 (12GB): batch_size=16
+  # RTX 4090 (24GB): batch_size=32
+  batch_size: 16
+  num_epochs: 100
+  num_workers: 8  # CUDA 支持更多 workers
+  
+  # 混合精度训练 (CUDA 必需)
+  amp:
+    enabled: true
+    dtype: "float16"  # 或 "bfloat16" (Ampere+)
+
+  optimizer:
+    type: "AdamW"
+    lr: 2e-4  # CUDA 可用更大学习率
+    weight_decay: 1e-4
+    backbone_lr_mult: 0.1
+
+  scheduler:
+    type: "cosine_warmup"
+    warmup_epochs: 5
+    T_0: 10
+    T_mult: 2
+
+  loss:
+    types: ["dice", "bce", "focal"]
+    weights: [0.4, 0.3, 0.3]
+
+  augmentation:
+    enabled: true
+    random_crop_size: [512, 512]
+    horizontal_flip: 0.5
+    vertical_flip: 0.5
+    brightness: 0.2
+    contrast: 0.2
+    gaussian_noise: 0.01
+
+# ==================== CUDA 优化数据集配置 ====================
+data:
+  multi_dataset: true
+  unified_data_dir: "../Data/Unified_Cloud_Dataset"
+  
+  # 使用所有数据集
+  datasets:
+    - name: "hrcwhu"
+    - name: "rice2"
+    - name: "oncloudn"
+    - name: "cloud38"
+    - name: "cloud95"
+  
+  target_channels: 4
+  target_bit_depth: 16
+  use_nir: true
+  
+  nir_method: "physical"
+  nir_gain: 1.1
+  
+  # CUDA 上可用更强的归一化
+  normalization:
+    method: "percentile"
+    lower_percentile: 1.0
+    upper_percentile: 99.0
+  
+  val_test_split:
+    enabled: true
+    train_ratio: 0.80  # CUDA 可用更多训练数据
+    val_ratio: 0.15
+    test_ratio: 0.05
+    seed: 42
+    stratify: true
+
+# ==================== 推理配置 ====================
+inference:
+  mode: "sliding_window"
+  window_size: 512
+  stride: 256
+  scales: [0.5, 1.0, 1.5, 2.0]  # CUDA 支持更多尺度
+
+# ==================== 实验配置 ====================
+experiment:
+  seed: 42
+  save_dir: "./experiments_cuda"
+  log_interval: 10
+  val_interval: 1
+  save_best_only: false  # CUDA 可保存多个检查点
+
+# ==================== CUDA 特定提示 ====================
+# 使用说明:
+# 1. 训练: python3 train.py --config configs/cloudseg_cuda.yaml --device cuda
+# 2. 评估: python3 eval.py --checkpoint experiments_cuda/best_model.pth --device cuda
+# 3. 推理: python3 inference.py --checkpoint experiments_cuda/best_model.pth --device cuda
+#
+# CUDA 优化建议:
+# - 启用混合精度训练 (--amp) 加速并节省显存
+# - 根据 GPU 显存调整 batch_size
+# - 使用 num_workers=4-8 加速数据加载
+# - 推荐使用 EfficientNet-B4 或更大模型
