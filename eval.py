@@ -15,6 +15,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from models import CloudSenseNet, build_model
 from utils import load_config, SegmentationMetrics, sliding_window_inference
 from utils.metrics import compute_iou
+from data import NIRGenerator
 
 
 def load_model(checkpoint_path: str, device: torch.device):
@@ -32,11 +33,23 @@ def load_model(checkpoint_path: str, device: torch.device):
 
 def evaluate_model(model, image_dir, mask_dir, device, mode='sliding_window', config=None):
     """
-    评估模型性能
+    评估模型性能 (支持 RGB+NIR 四通道)
     
     Returns:
         metrics_dict: 包含各项评估指标的字典
     """
+    # 从配置获取 NIR 设置
+    use_nir = False
+    nir_generator = None
+    if config is not None:
+        data_cfg = config.get('data', {})
+        use_nir = data_cfg.get('use_nir', False)
+        if use_nir:
+            nir_method = data_cfg.get('nir_method', 'physical')
+            nir_gain = data_cfg.get('nir_gain', 1.1)
+            nir_generator = NIRGenerator(method=nir_method, gain=nir_gain)
+            print(f"[Eval] NIR enabled: method={nir_method}, gain={nir_gain}")
+    
     # 获取图像列表
     image_paths = []
     for ext in ['*.jpg', '*.png', '*.tif', '*.tiff']:
@@ -80,7 +93,12 @@ def evaluate_model(model, image_dir, mask_dir, device, mode='sliding_window', co
             
             # 预处理
             import torchvision.transforms as T
-            image_tensor = T.ToTensor()(image).to(device)
+            image_tensor = T.ToTensor()(image).to(device)  # [3, H, W]
+            
+            # 生成 NIR 通道 (如果需要)
+            if use_nir and nir_generator is not None:
+                nir = nir_generator(image_tensor)  # [1, H, W]
+                image_tensor = torch.cat([image_tensor, nir], dim=0)  # [4, H, W]
             
             # 推理
             if mode == 'sliding_window':

@@ -1,24 +1,33 @@
-# CloudSense-Net Apple MPS (Metal Performance Shaders) 优化配置
-# 专为 Apple Silicon (M1/M2/M3) 优化的配置
+# CloudSense-Net RGB+NIR 四通道配置文件
+# 使用业界最优 NIR 生成算法，从 RGB 生成伪 NIR 通道
+#
+# NIR (近红外) 在云分割中的优势:
+# - 云在 NIR 波段具有更高的反射率，与地表/植被形成更强对比
+# - 利用植被指数 (NDVI) 思想增强云边界检测
+# - 参考 Sentinel-2、Landsat 等卫星的多光谱特性
 
 # ==================== 模型架构配置 ====================
 model:
-  name: "CloudSenseNet_MPS"
-  num_classes: 2
+  name: "CloudSenseNet-RGBNIR"
+  num_classes: 2  # 云/背景 二分类
 
   # ------------------ 编码器选择 ------------------
-  # 推荐 ConvNeXt 或 EfficientNet，在MPS上效率更高
   encoder:
-    type: "efficientnet"  # convnext/efficientnet/resnet (swin在MPS上较慢)
+    type: "efficientnet"  # 推荐 EfficientNet 或 ConvNeXt
     enabled: true
-    convnext:
+    
+    efficientnet:
       model_name: "efficientnet_b3"
+      pretrained: true
+    
+    convnext:
+      model_name: "convnext_tiny"
       pretrained: true
       drop_path_rate: 0.1
 
   # ------------------ 语义增强模块 ------------------
   semantic_enhancement:
-    enabled: true
+    enabled: false
     vocabulary_size: 2
     patch_size: 16
     embed_dim: 768
@@ -27,36 +36,37 @@ model:
   # ------------------ 特征融合层 ------------------
   fusion:
     enabled: true
-    type: "fpn"  # FPN在MPS上效率较好
+    type: "fpn"
+    
     fpn:
       out_channels: 256
       num_levels: 4
 
   # ------------------ 解码器选择 ------------------
   decoder:
-    type: "segformer"  # SegFormer轻量高效，适合MPS
+    type: "segformer"
     enabled: true
+    
     segformer:
       embed_dim: 256
 
   # ------------------ 辅助头 ------------------
   auxiliary_head:
-    enabled: false  # MPS显存有限，建议禁用
+    enabled: false
     loss_weight: 0.4
 
-# ==================== MPS优化训练配置 ====================
+# ==================== 训练配置 ====================
 training:
-  # Apple Silicon统一内存架构，但建议batch_size不要太大
-  batch_size: 8  # M2建议4-8，根据内存调整
-  num_epochs: 5
-  num_workers: 1  # MPS支持多线程数据加载
-
+  batch_size: 4  # 4通道比3通道占用更多显存，适当减小
+  num_epochs: 100
+  num_workers: 4
+  
   optimizer:
     type: "AdamW"
     lr: 1e-4
     weight_decay: 1e-4
     backbone_lr_mult: 0.1
-
+  
   scheduler:
     type: "cosine_warmup"
     warmup_epochs: 5
@@ -66,7 +76,7 @@ training:
   loss:
     types: ["dice", "bce"]
     weights: [0.5, 0.5]
-
+    
   augmentation:
     enabled: true
     random_crop_size: [512, 512]
@@ -75,16 +85,18 @@ training:
     brightness: 0.2
     contrast: 0.2
     gaussian_noise: 0.01
+    # NIR 会在数据增强后自动从增强后的 RGB 生成
 
-# ==================== 数据配置 ====================
+# ==================== 数据配置 (含 NIR 配置) ====================
 data:
   train_data_path: "../Data/RICE2"
   val_data_path: "../Data/HRC_WHU"
   test_data_path: "../Data/HRC_WHU"
-
+  
+  # ------------------ NIR 通道配置 ------------------
   # 是否启用 NIR 通道 (RGB -> RGB+NIR)
   use_nir: true
-
+  
   # NIR 生成算法:
   # - 'physical': 基于云光谱物理特性 (推荐)
   #   公式: NIR = 0.7*R + 0.25*G + 0.05*B
@@ -102,11 +114,12 @@ data:
   #   公式: NIR = 0.65*R + 0.25*G + 0.10*B
   #   原理: 平衡加权，适合一般场景
   nir_method: "physical"
-
+  
   # NIR 增益系数: 云在 NIR 反射率通常比 RGB 高 10-30%
   # 推荐范围: 1.0 - 1.3
   nir_gain: 1.1
-
+  
+  # 推理配置
   inference:
     mode: "sliding_window"
     window_size: 512
@@ -120,15 +133,3 @@ experiment:
   log_interval: 10
   val_interval: 1
   save_best_only: true
-
-# ==================== MPS特定提示 ====================
-# 使用说明:
-# 1. 训练: python3 train.py --config configs/cloudseg_mps_optimized.yaml --device mps
-# 2. 评估: python3 eval.py --checkpoint experiments_mps/best_model.pth --device mps ...
-# 3. 推理: python3 inference.py --checkpoint experiments_mps/best_model.pth --device mps ...
-#
-# MPS优化建议:
-# - 使用 --device auto 自动检测MPS
-# - batch_size根据Mac内存调整: M2(8GB)->4, M2 Pro(16GB)->8, M2 Max(32GB)->16
-# - 避免使用Swin Transformer（在MPS上性能不佳）
-# - 推荐使用ConvNeXt或EfficientNet

@@ -11,20 +11,26 @@ def build_model(config: Dict[str, Any]) -> nn.Module:
     return CloudSenseNet(config)
 
 
-def build_backbone(backbone_type: str, config: Dict[str, Any]) -> nn.Module:
-    """构建编码器/主干网络"""
+def build_backbone(backbone_type: str, config: Dict[str, Any], in_channels: int = 3) -> nn.Module:
+    """构建编码器/主干网络
+    
+    Args:
+        backbone_type: 主干网络类型
+        config: 配置字典
+        in_channels: 输入通道数 (3=RGB, 4=RGB+NIR)
+    """
     if backbone_type == "swin":
         from .backbones.swin_backbone import SwinBackbone
-        return SwinBackbone(**config.get('swin', {}))
+        return SwinBackbone(in_channels=in_channels, **config.get('swin', {}))
     elif backbone_type == "convnext":
         from .backbones.convnext_backbone import ConvNeXtBackbone
-        return ConvNeXtBackbone(**config.get('convnext', {}))
+        return ConvNeXtBackbone(in_channels=in_channels, **config.get('convnext', {}))
     elif backbone_type == "efficientnet":
         from .backbones.efficientnet_backbone import EfficientNetBackbone
-        return EfficientNetBackbone(**config.get('efficientnet', {}))
+        return EfficientNetBackbone(in_channels=in_channels, **config.get('efficientnet', {}))
     elif backbone_type == "resnet":
         from .backbones.resnet_backbone import ResNetBackbone
-        return ResNetBackbone(**config.get('resnet', {}))
+        return ResNetBackbone(in_channels=in_channels, **config.get('resnet', {}))
     else:
         raise ValueError(f"Unknown backbone type: {backbone_type}")
 

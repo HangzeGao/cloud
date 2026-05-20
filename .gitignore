@@ -27,8 +27,6 @@ checkpoints/
 *.ckpt
 
 # Data (large files)
-data/
-Data/
 *.jpg
 *.png
 *.tif

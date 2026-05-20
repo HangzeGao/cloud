@@ -50,9 +50,15 @@ class CloudSenseNet(nn.Module):
         
         assert self.encoder_enabled, "Encoder must be enabled"
         
-        # 构建编码器
-        self.encoder = build_backbone(self.encoder_type, encoder_cfg)
+        # 从数据配置获取输入通道数 (3=RGB, 4=RGB+NIR)
+        data_cfg = config.get('data', {})
+        self.in_channels = 4 if data_cfg.get('use_nir', True) else 3
+        
+        # 构建编码器（传递 in_channels 参数）
+        self.encoder = build_backbone(self.encoder_type, encoder_cfg, in_channels=self.in_channels)
         self.encoder_channels = self.encoder.get_feature_channels()
+        
+        print(f"[CloudSenseNet] Input channels: {self.in_channels} ({'RGB+NIR' if self.in_channels == 4 else 'RGB only'})")
         
         print(f"[CloudSenseNet] Encoder: {self.encoder_type}")
         print(f"[CloudSenseNet] Encoder channels: {self.encoder_channels}")

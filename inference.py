@@ -15,7 +15,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from models import CloudSenseNet, build_model
 from utils import load_config, sliding_window_inference, multi_scale_inference, whole_image_inference
-from data.cloud_dataset import InferenceDataset
+from data import InferenceDataset, NIRGenerator
 
 
 def load_model(checkpoint_path: str, device: torch.device):
@@ -66,7 +66,7 @@ def inference_single_image(
     config: dict = None
 ) -> torch.Tensor:
     """
-    对单张图像进行推理
+    对单张图像进行推理 (支持 RGB+NIR 四通道)
     
     Args:
         model: 模型
@@ -78,12 +78,28 @@ def inference_single_image(
     Returns:
         prediction: 预测结果
     """
+    # 从配置获取 NIR 设置
+    use_nir = False
+    nir_generator = None
+    if config is not None:
+        data_cfg = config.get('data', {})
+        use_nir = data_cfg.get('use_nir', False)
+        if use_nir:
+            nir_method = data_cfg.get('nir_method', 'physical')
+            nir_gain = data_cfg.get('nir_gain', 1.1)
+            nir_generator = NIRGenerator(method=nir_method, gain=nir_gain)
+    
     # 加载图像
     image = Image.open(image_path).convert('RGB')
     original_size = image.size  # (W, H)
     
     # 转换为Tensor
-    image_tensor = T.ToTensor()(image).to(device)
+    image_tensor = T.ToTensor()(image).to(device)  # [3, H, W]
+    
+    # 生成 NIR 通道 (如果需要)
+    if use_nir and nir_generator is not None:
+        nir = nir_generator(image_tensor)  # [1, H, W]
+        image_tensor = torch.cat([image_tensor, nir], dim=0)  # [4, H, W]
     
     # 根据模式选择推理方法
     with torch.no_grad():
@@ -190,6 +206,16 @@ def main():
     
     # 加载模型
     model, config = load_model(args.checkpoint, device)
+    
+    # 打印 NIR 配置
+    data_cfg = config.get('data', {})
+    use_nir = data_cfg.get('use_nir', False)
+    if use_nir:
+        nir_method = data_cfg.get('nir_method', 'physical')
+        nir_gain = data_cfg.get('nir_gain', 1.1)
+        print(f"[Inference] NIR enabled: method={nir_method}, gain={nir_gain}")
+    else:
+        print(f"[Inference] NIR disabled (RGB only)")
     
     # 创建输出目录
     os.makedirs(args.output, exist_ok=True)
