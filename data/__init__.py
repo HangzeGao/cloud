@@ -16,16 +16,12 @@ from cloud_dataset_loader import UnifiedCloudDataset
 
 # 保留本项目的辅助功能
 from .cloud_dataset import (
-    NIRGenerator,
     CloudAugmentation,
-    ImageNormalizer,
     create_mixed_dataloaders,
 )
 
 __all__ = [
     'UnifiedCloudDataset',  # 上层的数据集加载器
-    'NIRGenerator',
     'CloudAugmentation',
-    'ImageNormalizer',
     'create_mixed_dataloaders',
 ]

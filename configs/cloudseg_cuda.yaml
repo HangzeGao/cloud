@@ -13,7 +13,6 @@ model:
     efficientnet:
       model_name: "efficientnet_b4"  # CUDA 可用更大模型
       pretrained: true
-      drop_path_rate: 0.2
 
   # 语义增强模块
   semantic_enhancement:
@@ -84,7 +83,6 @@ training:
 
 # ==================== CUDA 优化数据集配置 ====================
 data:
-  multi_dataset: true
   unified_data_dir: "../Data/Unified_Cloud_Dataset"
   
   # 使用所有数据集
@@ -95,18 +93,11 @@ data:
     - name: "cloud38"
     - name: "cloud95"
   
-  target_channels: 4
-  target_bit_depth: 16
+  # use_nir: 是否使用 NIR 通道 (true=4通道 RGB+NIR, false=3通道 RGB)
   use_nir: true
   
-  nir_method: "physical"
-  nir_gain: 1.1
-  
-  # CUDA 上可用更强的归一化
-  normalization:
-    method: "percentile"
-    lower_percentile: 1.0
-    upper_percentile: 99.0
+  # normalize: 归一化方法 ('percentile', 'minmax', 'standard', 'reflectance', 'none')
+  normalize: 'percentile'
   
   val_test_split:
     enabled: true

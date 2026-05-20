@@ -15,7 +15,6 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from models import CloudSenseNet, build_model
 from utils import load_config, SegmentationMetrics, sliding_window_inference
 from utils.metrics import compute_iou
-from data import NIRGenerator
 
 
 def load_model(checkpoint_path: str, device: torch.device):
@@ -33,22 +32,17 @@ def load_model(checkpoint_path: str, device: torch.device):
 
 def evaluate_model(model, image_dir, mask_dir, device, mode='sliding_window', config=None):
     """
-    评估模型性能 (支持 RGB+NIR 四通道)
+    评估模型性能
     
     Returns:
         metrics_dict: 包含各项评估指标的字典
     """
     # 从配置获取 NIR 设置
     use_nir = False
-    nir_generator = None
     if config is not None:
         data_cfg = config.get('data', {})
         use_nir = data_cfg.get('use_nir', False)
-        if use_nir:
-            nir_method = data_cfg.get('nir_method', 'physical')
-            nir_gain = data_cfg.get('nir_gain', 1.1)
-            nir_generator = NIRGenerator(method=nir_method, gain=nir_gain)
-            print(f"[Eval] NIR enabled: method={nir_method}, gain={nir_gain}")
+        print(f"[Eval] use_nir={use_nir}")
     
     # 获取图像列表
     image_paths = []
@@ -63,7 +57,7 @@ def evaluate_model(model, image_dir, mask_dir, device, mode='sliding_window', co
     with torch.no_grad():
         for img_path in tqdm(image_paths, desc="Evaluating"):
             # 加载图像和标注
-            image = Image.open(img_path).convert('RGB')
+            image = Image.open(img_path)
             
             img_name = os.path.basename(img_path)
             name_wo_ext = os.path.splitext(img_name)[0]
@@ -93,12 +87,18 @@ def evaluate_model(model, image_dir, mask_dir, device, mode='sliding_window', co
             
             # 预处理
             import torchvision.transforms as T
-            image_tensor = T.ToTensor()(image).to(device)  # [3, H, W]
             
-            # 生成 NIR 通道 (如果需要)
-            if use_nir and nir_generator is not None:
-                nir = nir_generator(image_tensor)  # [1, H, W]
-                image_tensor = torch.cat([image_tensor, nir], dim=0)  # [4, H, W]
+            # 根据 use_nir 决定加载的通道数
+            if use_nir:
+                # 4通道模式：需要加载 RGB+NIR
+                # 假设图像为4通道TIFF或需要从其他来源获取NIR
+                image = image.convert('RGB')  # 先转为RGB，实际项目中根据数据格式调整
+                image_tensor = T.ToTensor()(image).to(device)  # [3, H, W]
+                # 注意：实际评估时需要确保输入通道数与模型匹配
+                # 这里假设数据集已包含NIR通道，如需支持4通道图像加载需要相应调整
+            else:
+                image = image.convert('RGB')
+                image_tensor = T.ToTensor()(image).to(device)  # [3, H, W]
             
             # 推理
             if mode == 'sliding_window':

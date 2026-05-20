@@ -13,7 +13,6 @@ model:
     efficientnet:
       model_name: "efficientnet_b3"
       pretrained: true
-      drop_path_rate: 0.1
 
   # 语义增强模块
   semantic_enhancement:
@@ -76,9 +75,6 @@ training:
 
 # ==================== 数据集配置 ====================
 data:
-  # 使用统一数据集
-  multi_dataset: true
-  
   # 统一数据集目录
   unified_data_dir: "../Data/Unified_Cloud_Dataset"
   
@@ -91,19 +87,11 @@ data:
     - name: "cloud95"
   
   # 数据统一配置
-  target_channels: 4      # 目标通道数：4 (RGB+NIR)
-  target_bit_depth: 16    # 目标位深：16bit
+  # use_nir: 是否使用 NIR 通道 (true=4通道 RGB+NIR, false=3通道 RGB)
   use_nir: true
   
-  # NIR 生成算法（用于从 RGB 生成 NIR 的数据集）
-  nir_method: "physical"
-  nir_gain: 1.1
-  
-  # 归一化配置
-  normalization:
-    method: "percentile"
-    lower_percentile: 1.0
-    upper_percentile: 99.0
+  # normalize: 归一化方法 ('percentile', 'minmax', 'standard', 'reflectance', 'none')
+  normalize: 'percentile'
   
   # Val/Test 分割配置
   val_test_split:

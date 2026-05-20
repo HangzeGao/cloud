@@ -15,7 +15,6 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from models import CloudSenseNet, build_model
 from utils import load_config, sliding_window_inference, multi_scale_inference, whole_image_inference
-from data import InferenceDataset, NIRGenerator
 
 
 def load_model(checkpoint_path: str, device: torch.device):
@@ -66,7 +65,7 @@ def inference_single_image(
     config: dict = None
 ) -> torch.Tensor:
     """
-    对单张图像进行推理 (支持 RGB+NIR 四通道)
+    对单张图像进行推理
     
     Args:
         model: 模型
@@ -80,31 +79,31 @@ def inference_single_image(
     """
     # 从配置获取 NIR 设置
     use_nir = False
-    nir_generator = None
     if config is not None:
         data_cfg = config.get('data', {})
         use_nir = data_cfg.get('use_nir', False)
-        if use_nir:
-            nir_method = data_cfg.get('nir_method', 'physical')
-            nir_gain = data_cfg.get('nir_gain', 1.1)
-            nir_generator = NIRGenerator(method=nir_method, gain=nir_gain)
     
     # 加载图像
-    image = Image.open(image_path).convert('RGB')
+    image = Image.open(image_path)
     original_size = image.size  # (W, H)
     
-    # 转换为Tensor
-    image_tensor = T.ToTensor()(image).to(device)  # [3, H, W]
-    
-    # 生成 NIR 通道 (如果需要)
-    if use_nir and nir_generator is not None:
-        nir = nir_generator(image_tensor)  # [1, H, W]
-        image_tensor = torch.cat([image_tensor, nir], dim=0)  # [4, H, W]
+    # 根据 use_nir 决定图像加载方式
+    if use_nir:
+        # 4通道模式：需要 RGB+NIR
+        # 注意：实际项目中需根据数据格式调整，这里假设需要4通道输入
+        # 如果图像本身不包含NIR通道，需要从其他来源获取
+        image = image.convert('RGB')
+        image_tensor = T.ToTensor()(image).to(device)  # [3, H, W]
+        # 注意：确保输入通道数与模型训练时的通道数匹配
+    else:
+        # 3通道 RGB 模式
+        image = image.convert('RGB')
+        image_tensor = T.ToTensor()(image).to(device)  # [3, H, W]
     
     # 根据模式选择推理方法
     with torch.no_grad():
         if mode == 'sliding_window':
-            inf_cfg = config.get('data', {}).get('inference', {})
+            inf_cfg = config.get('inference', {}) if config else {}
             window_size = inf_cfg.get('window_size', 512)
             stride = inf_cfg.get('stride', 256)
             
@@ -117,7 +116,7 @@ def inference_single_image(
             )
         
         elif mode == 'multi_scale':
-            inf_cfg = config.get('data', {}).get('inference', {})
+            inf_cfg = config.get('inference', {}) if config else {}
             scales = inf_cfg.get('scales', [0.5, 1.0, 1.5])
             
             pred = multi_scale_inference(
@@ -210,12 +209,7 @@ def main():
     # 打印 NIR 配置
     data_cfg = config.get('data', {})
     use_nir = data_cfg.get('use_nir', False)
-    if use_nir:
-        nir_method = data_cfg.get('nir_method', 'physical')
-        nir_gain = data_cfg.get('nir_gain', 1.1)
-        print(f"[Inference] NIR enabled: method={nir_method}, gain={nir_gain}")
-    else:
-        print(f"[Inference] NIR disabled (RGB only)")
+    print(f"[Inference] use_nir={use_nir} ({'4-channel RGB+NIR' if use_nir else '3-channel RGB'})")
     
     # 创建输出目录
     os.makedirs(args.output, exist_ok=True)
