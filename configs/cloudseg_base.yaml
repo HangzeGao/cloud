@@ -106,6 +106,10 @@ data:
   # use_nir: 是否使用 NIR 通道 (true=4通道 RGB+NIR, false=3通道 RGB)
   use_nir: true
   
+  # nir_method: 伪NIR生成方法 (仅当 use_nir=true 且输入为3通道时生效)
+  # 可选: 'physical', 'vegetation', 'guided', 'context', 'ensemble'
+  nir_method: 'ensemble'  # 集成方法，综合多种策略
+  
   # normalize: 归一化方法 ('percentile', 'minmax', 'standard', 'reflectance', 'none')
   normalize: 'percentile'
   

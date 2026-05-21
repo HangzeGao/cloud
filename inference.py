@@ -15,6 +15,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from models import CloudSenseNet, build_model
 from utils import load_config, sliding_window_inference, multi_scale_inference, whole_image_inference
+from utils.nir_generator import generate_pseudo_nir
 
 
 def load_model(checkpoint_path: str, device: torch.device):
@@ -62,7 +63,8 @@ def inference_single_image(
     image_path: str,
     device: torch.device,
     mode: str = 'sliding_window',
-    config: dict = None
+    config: dict = None,
+    nir_method: str = 'ensemble'
 ) -> torch.Tensor:
     """
     对单张图像进行推理
@@ -73,6 +75,7 @@ def inference_single_image(
         device: 设备
         mode: 推理模式
         config: 配置
+        nir_method: 伪NIR生成方法 ('physical', 'vegetation', 'guided', 'context', 'ensemble')
         
     Returns:
         prediction: 预测结果
@@ -82,6 +85,8 @@ def inference_single_image(
     if config is not None:
         data_cfg = config.get('data', {})
         use_nir = data_cfg.get('use_nir', False)
+        # 从配置读取伪NIR生成方法，默认为 ensemble
+        nir_method = data_cfg.get('nir_method', nir_method)
     
     # 加载图像
     image = Image.open(image_path)
@@ -101,21 +106,30 @@ def inference_single_image(
             image_4ch = np.concatenate([rgb, nir], axis=2)
             image_tensor = torch.from_numpy(image_4ch).permute(2, 0, 1).float().to(device) / 255.0
         elif image_mode in ('RGB', 'P'):
-            # 3通道图像，需要生成伪NIR
+            # 3通道图像，使用先进的伪NIR生成算法
             image = image.convert('RGB')
             image_array = np.array(image)
-            # 简单的伪NIR生成：使用红色通道的增强版
-            r, g, b = image_array[:, :, 0], image_array[:, :, 1], image_array[:, :, 2]
-            nir = (0.1 * r + 0.25 * g + 0.65 * b).astype(np.uint8)
-            image_4ch = np.stack([r, g, b, nir], axis=2)
+            
+            # 使用新的伪NIR生成器
+            nir = generate_pseudo_nir(image_array, method=nir_method)
+            
+            # 组合成4通道图像
+            image_4ch = np.stack([
+                image_array[:, :, 0],  # R
+                image_array[:, :, 1],  # G
+                image_array[:, :, 2],  # B
+                nir.astype(np.uint8)    # 伪NIR
+            ], axis=2)
+            
             image_tensor = torch.from_numpy(image_4ch).permute(2, 0, 1).float().to(device) / 255.0
         else:
-            # 其他格式，尝试直接转换
+            # 其他格式，使用torch版本的生成器
             image = image.convert('RGB')
             image_tensor = T.ToTensor()(image).to(device)  # [3, H, W]
-            # 扩展为4通道
-            nir = image_tensor[0:1, :, :] * 0.7 + image_tensor[1:2, :, :] * 0.25 + image_tensor[2:3, :, :] * 0.05
-            image_tensor = torch.cat([image_tensor, nir], dim=0)
+            
+            # 使用torch版本的生成器
+            nir = generate_pseudo_nir(image_tensor, method=nir_method)
+            image_tensor = torch.cat([image_tensor, nir.unsqueeze(0) if nir.dim() == 2 else nir], dim=0)
     else:
         # 3通道 RGB 模式
         image = image.convert('RGB')
@@ -230,7 +244,10 @@ def main():
     # 打印 NIR 配置
     data_cfg = config.get('data', {})
     use_nir = data_cfg.get('use_nir', False)
+    nir_method = data_cfg.get('nir_method', 'ensemble')
     print(f"[Inference] use_nir={use_nir} ({'4-channel RGB+NIR' if use_nir else '3-channel RGB'})")
+    if use_nir:
+        print(f"[Inference] Pseudo-NIR method: {nir_method}")
     
     # 创建输出目录
     os.makedirs(args.output, exist_ok=True)

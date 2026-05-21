@@ -107,6 +107,9 @@ data:
   # use_nir: 是否使用 NIR 通道 (true=4通道 RGB+NIR, false=3通道 RGB)
   use_nir: true
   
+  # nir_method: 伪NIR生成方法 (CUDA推荐'context'场景感知或'ensemble')
+  nir_method: 'ensemble'
+  
   # normalize: 归一化方法 ('percentile', 'minmax', 'standard', 'reflectance', 'none')
   normalize: 'percentile'
   

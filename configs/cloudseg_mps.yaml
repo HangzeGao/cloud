@@ -10,7 +10,7 @@ model:
   # MPS推荐: conv（轻量）或 physics（可解释性强）
   channel_adaptive:
     enabled: true
-    method: conv            # conv / attention / physics / hybrid / transformer
+    method: physics            # conv / attention / physics / hybrid / transformer
     use_attention: true
     out_channels: 4
 
@@ -57,11 +57,11 @@ training:
   # M2 Pro (16GB): batch_size=8
   # M2 Max (32GB): batch_size=16
   batch_size: 4
-  num_epochs: 50
+  num_epochs: 15
   num_workers: 0
   
   # 早停耐心值 (0 = 禁用早停)
-  patience: 10
+  patience: 5
   
   # MPS 混合精度支持有限，建议禁用
   amp:
@@ -104,6 +104,9 @@ data:
   
   # use_nir: 是否使用 NIR 通道 (true=4通道 RGB+NIR, false=3通道 RGB)
   use_nir: true
+  
+  # nir_method: 伪NIR生成方法 (MPS推荐'guided'保持边缘或'ensemble'综合)
+  nir_method: 'ensemble'
   
   # normalize: 归一化方法 ('percentile', 'minmax', 'standard', 'reflectance', 'none')
   normalize: 'percentile'
