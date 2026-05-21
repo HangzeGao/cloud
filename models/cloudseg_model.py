@@ -222,7 +222,14 @@ class CloudSenseNet(nn.Module):
             if main_logits.shape[-2:] != input_size:
                 main_logits = F.interpolate(main_logits, size=input_size, mode='bilinear', align_corners=False)
             output['logits'] = main_logits
-            output['deep_supervision'] = deep_supervision
+            
+            # 确保所有深度监督输出尺寸与输入匹配
+            aligned_ds = []
+            for ds in deep_supervision:
+                if ds.shape[-2:] != input_size:
+                    ds = F.interpolate(ds, size=input_size, mode='bilinear', align_corners=False)
+                aligned_ds.append(ds)
+            output['deep_supervision'] = aligned_ds
         else:
             logits = decoder_output
             # 确保输出尺寸与输入匹配（decoder可能输出不同尺寸）
@@ -249,17 +256,28 @@ class CloudSenseNet(nn.Module):
         total_loss = 0
         
         # 主损失
-        total_loss += criterion(predictions['logits'], target)
+        main_logits = predictions['logits']
+        # 确保主输出尺寸与target匹配
+        if main_logits.shape[-2:] != target.shape[-2:]:
+            main_logits = F.interpolate(main_logits, size=target.shape[-2:], mode='bilinear', align_corners=False)
+        total_loss += criterion(main_logits, target)
         
         # 辅助头损失
         if 'aux_logits' in predictions:
-            aux_loss = criterion(predictions['aux_logits'], target)
+            aux_logits = predictions['aux_logits']
+            # 确保辅助输出尺寸与target匹配
+            if aux_logits.shape[-2:] != target.shape[-2:]:
+                aux_logits = F.interpolate(aux_logits, size=target.shape[-2:], mode='bilinear', align_corners=False)
+            aux_loss = criterion(aux_logits, target)
             total_loss += self.aux_weight * aux_loss
         
         # 深度监督损失
         if 'deep_supervision' in predictions and self.training:
             ds_weight = 0.4  # 深度监督权重
-            for i, ds_logits in enumerate(predictions['deep_supervision']):
+            for ds_logits in predictions['deep_supervision']:
+                # 确保深度监督输出尺寸与target匹配
+                if ds_logits.shape[-2:] != target.shape[-2:]:
+                    ds_logits = F.interpolate(ds_logits, size=target.shape[-2:], mode='bilinear', align_corners=False)
                 ds_loss = criterion(ds_logits, target)
                 total_loss += ds_weight * ds_loss / len(predictions['deep_supervision'])
         

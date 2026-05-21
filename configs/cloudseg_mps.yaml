@@ -40,10 +40,10 @@ model:
 
   # 解码器选择 - SegFormer 轻量高效
   decoder:
-    type: "segformer"
+    type: "unetpp"
     enabled: true
-    segformer:
-      embed_dim: 256
+#    segformer:
+#      embed_dim: 256
 
   # 辅助头 - MPS 显存有限，建议禁用
   auxiliary_head:
@@ -57,11 +57,11 @@ training:
   # M2 Pro (16GB): batch_size=8
   # M2 Max (32GB): batch_size=16
   batch_size: 4
-  num_epochs: 15
+  num_epochs: 5
   num_workers: 0
   
   # 早停耐心值 (0 = 禁用早停)
-  patience: 5
+  patience: 3
   
   # MPS 混合精度支持有限，建议禁用
   amp:
@@ -106,7 +106,7 @@ data:
   use_nir: true
   
   # nir_method: 伪NIR生成方法 (MPS推荐'guided'保持边缘或'ensemble'综合)
-  nir_method: 'ensemble'
+  nir_method: 'guided'
   
   # normalize: 归一化方法 ('percentile', 'minmax', 'standard', 'reflectance', 'none')
   normalize: 'percentile'
