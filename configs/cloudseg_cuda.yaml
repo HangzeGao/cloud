@@ -83,7 +83,7 @@ training:
 
 # ==================== CUDA 优化数据集配置 ====================
 data:
-  unified_data_dir: "../Data/Unified_Cloud_Dataset"
+  unified_data_dir: "./Data/Unified_Cloud_Dataset"
   
   # 使用所有数据集
   datasets:

@@ -87,14 +87,35 @@ def inference_single_image(
     image = Image.open(image_path)
     original_size = image.size  # (W, H)
     
+    # 检查图像模式
+    image_mode = image.mode
+    
     # 根据 use_nir 决定图像加载方式
     if use_nir:
         # 4通道模式：需要 RGB+NIR
-        # 注意：实际项目中需根据数据格式调整，这里假设需要4通道输入
-        # 如果图像本身不包含NIR通道，需要从其他来源获取
-        image = image.convert('RGB')
-        image_tensor = T.ToTensor()(image).to(device)  # [3, H, W]
-        # 注意：确保输入通道数与模型训练时的通道数匹配
+        if image_mode == 'RGBA':
+            # 使用 Alpha 通道作为 NIR 近似
+            image_array = np.array(image)
+            rgb = image_array[:, :, :3]
+            nir = image_array[:, :, 3:4]  # Alpha as NIR
+            image_4ch = np.concatenate([rgb, nir], axis=2)
+            image_tensor = torch.from_numpy(image_4ch).permute(2, 0, 1).float().to(device) / 255.0
+        elif image_mode in ('RGB', 'P'):
+            # 3通道图像，需要生成伪NIR
+            image = image.convert('RGB')
+            image_array = np.array(image)
+            # 简单的伪NIR生成：使用红色通道的增强版
+            r, g, b = image_array[:, :, 0], image_array[:, :, 1], image_array[:, :, 2]
+            nir = (0.7 * r + 0.25 * g + 0.05 * b).astype(np.uint8)
+            image_4ch = np.stack([r, g, b, nir], axis=2)
+            image_tensor = torch.from_numpy(image_4ch).permute(2, 0, 1).float().to(device) / 255.0
+        else:
+            # 其他格式，尝试直接转换
+            image = image.convert('RGB')
+            image_tensor = T.ToTensor()(image).to(device)  # [3, H, W]
+            # 扩展为4通道
+            nir = image_tensor[0:1, :, :] * 0.7 + image_tensor[1:2, :, :] * 0.25 + image_tensor[2:3, :, :] * 0.05
+            image_tensor = torch.cat([image_tensor, nir], dim=0)
     else:
         # 3通道 RGB 模式
         image = image.convert('RGB')

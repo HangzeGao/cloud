@@ -49,8 +49,8 @@ training:
   # M2 Pro (16GB): batch_size=8
   # M2 Max (32GB): batch_size=16
   batch_size: 4
-  num_epochs: 3
-  num_workers: 2  # MPS 推荐较少 workers
+  num_epochs: 50
+  num_workers: 0
   
   # MPS 混合精度支持有限，建议禁用
   amp:
@@ -83,7 +83,7 @@ training:
 
 # ==================== MPS 优化数据集配置 ====================
 data:
-  unified_data_dir: "../Data/Unified_Cloud_Dataset"
+  unified_data_dir: "./Data/Unified_Cloud_Dataset"
   
   # MPS 建议从少量数据集开始
   datasets:

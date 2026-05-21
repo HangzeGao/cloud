@@ -27,6 +27,7 @@ checkpoints/
 *.ckpt
 
 # Data (large files)
+Unified_Cloud_Dataset/
 *.jpg
 *.png
 *.tif
