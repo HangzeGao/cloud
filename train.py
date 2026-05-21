@@ -332,6 +332,11 @@ def main():
     # 恢复训练
     start_epoch = 0
     best_miou = 0.0
+    patience_counter = 0
+    patience = config['training'].get('patience', 0)  # 0 表示禁用早停
+    
+    if patience > 0:
+        print(f"[Early Stopping] Enabled with patience={patience}")
     
     if args.resume:
         print(f"Resuming from {args.resume}")
@@ -369,9 +374,10 @@ def main():
             if isinstance(scheduler, optim.lr_scheduler.ReduceLROnPlateau):
                 scheduler.step(val_metrics['mIoU'])
             
-            # 保存最佳模型
+            # 保存最佳模型 & 早停检查
             if val_metrics['mIoU'] > best_miou:
                 best_miou = val_metrics['mIoU']
+                patience_counter = 0  # 重置耐心计数器
                 
                 checkpoint = {
                     'epoch': epoch,
@@ -384,6 +390,16 @@ def main():
                 save_path = os.path.join(save_dir, 'best_model.pth')
                 torch.save(checkpoint, save_path)
                 print(f"Saved best model (mIoU: {best_miou:.4f}) to {save_path}")
+            else:
+                # 没有改善，增加耐心计数器
+                if patience > 0:
+                    patience_counter += 1
+                    print(f"No improvement for {patience_counter} epochs (patience={patience})")
+                    
+                    if patience_counter >= patience:
+                        print(f"\n[Early Stopping] Triggered after {patience} epochs without improvement")
+                        print(f"Best mIoU: {best_miou:.4f}")
+                        break
         
         # 定期保存checkpoint
         if epoch % 10 == 0:

@@ -47,6 +47,9 @@ training:
   batch_size: 8
   num_epochs: 50
   num_workers: 4
+  
+  # 早停耐心值 (0 = 禁用早停, >0 = 连续N个epoch无改善则停止)
+  patience: 10
 
   optimizer:
     type: "AdamW"

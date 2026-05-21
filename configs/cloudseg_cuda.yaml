@@ -51,6 +51,9 @@ training:
   num_epochs: 100
   num_workers: 8  # CUDA 支持更多 workers
   
+  # 早停耐心值 (0 = 禁用早停)
+  patience: 15
+  
   # 混合精度训练 (CUDA 必需)
   amp:
     enabled: true

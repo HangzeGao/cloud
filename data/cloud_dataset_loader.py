@@ -73,6 +73,7 @@ class UnifiedCloudDataset(Dataset):
         norm_params: Optional[Dict] = None,
         train_ratio: float = 0.7,
         val_ratio: float = 0.15,
+        test_ratio: float = 0.15,
         random_seed: int = 42,
         compute_stats: bool = False
     ):
@@ -95,6 +96,7 @@ class UnifiedCloudDataset(Dataset):
             norm_params: 自定义归一化参数，覆盖默认参数
             train_ratio: 训练集比例
             val_ratio: 验证集比例
+            test_ratio: 测试集比例
             random_seed: 随机种子
             compute_stats: 是否预计算数据集统计信息（用于标准分数归一化）
         """
@@ -107,6 +109,7 @@ class UnifiedCloudDataset(Dataset):
         self.custom_norm_params = norm_params or {}
         self.train_ratio = train_ratio
         self.val_ratio = val_ratio
+        self.test_ratio = test_ratio
 
         # 验证波段名称
         for band in self.bands:
@@ -202,10 +205,16 @@ class UnifiedCloudDataset(Dataset):
             n = len(ids)
             n_train = int(n * self.train_ratio)
             n_val = int(n * self.val_ratio)
+            # test_ratio 用于计算测试集大小，确保三个比例之和不超过1
+            n_test = int(n * self.test_ratio)
+            # 如果三个比例之和小于1，剩余样本分配给测试集
+            remaining = n - n_train - n_val - n_test
+            if remaining > 0:
+                n_test += remaining
 
             train_ids.extend(ids[:n_train])
             val_ids.extend(ids[n_train:n_train+n_val])
-            test_ids.extend(ids[n_train+n_val:])
+            test_ids.extend(ids[n_train+n_val:n_train+n_val+n_test])
 
         if self.split == "train":
             return train_ids
@@ -682,6 +691,7 @@ def create_mixed_dataloaders(config: dict, dev_run: bool = False):
         normalize=normalize,
         train_ratio=train_ratio,
         val_ratio=val_ratio,
+        test_ratio=test_ratio,
         random_seed=seed,
     )
     
@@ -694,6 +704,7 @@ def create_mixed_dataloaders(config: dict, dev_run: bool = False):
         normalize=normalize,
         train_ratio=train_ratio,
         val_ratio=val_ratio,
+        test_ratio=test_ratio,
         random_seed=seed,
     )
     
@@ -706,14 +717,15 @@ def create_mixed_dataloaders(config: dict, dev_run: bool = False):
         normalize=normalize,
         train_ratio=train_ratio,
         val_ratio=val_ratio,
+        test_ratio=test_ratio,
         random_seed=seed,
     )
     
     # Dev run: 限制数据集大小
     if dev_run:
-        train_samples = min(64, len(train_dataset))
-        val_samples = min(16, len(val_dataset))
-        test_samples = min(16, len(test_dataset))
+        train_samples = min(int(len(train_dataset) * 0.1), len(train_dataset))
+        val_samples = min(int(len(val_dataset) * 0.1), len(val_dataset))
+        test_samples = min(int(len(test_dataset) * 0.1), len(test_dataset))
         
         train_dataset = Subset(train_dataset, range(train_samples))
         val_dataset = Subset(val_dataset, range(val_samples))
