@@ -138,27 +138,6 @@ class UnifiedCloudDataset(Dataset):
 
         print(f"[{split}] 加载 {len(self.sample_ids)} 个样本 (归一化: {normalize})")
 
-        # 验证波段名称
-        for band in self.bands:
-            if band not in self.AVAILABLE_BANDS:
-                raise ValueError(f"未知波段: {band}. 可用波段: {self.AVAILABLE_BANDS}")
-
-        # 加载元数据
-        self.metadata_path = self.data_dir / "metadata.json"
-        if not self.metadata_path.exists():
-            raise FileNotFoundError(f"未找到元数据文件: {self.metadata_path}")
-
-        with open(self.metadata_path, 'r') as f:
-            self.metadata = json.load(f)
-
-        # 获取样本列表
-        self.samples = self._get_samples()
-
-        # 划分数据集
-        self.sample_ids = self._split_samples(random_seed)
-
-        print(f"[{split}] 加载 {len(self.sample_ids)} 个样本")
-
     def _get_samples(self) -> List[Dict]:
         """获取所有可用样本"""
         images_dir = self.data_dir / "images"
@@ -652,139 +631,32 @@ def get_dataloader(
     return dataloader
 
 
-# 使用示例
+# 简单的命令行测试
 if __name__ == "__main__":
     import sys
 
     if len(sys.argv) < 2:
         print("用法: python cloud_dataset_loader.py <统一数据集路径>")
-        print("\n示例:")
-        print("  python cloud_dataset_loader.py ./Unified_Cloud_Dataset")
+        print("  python cloud_dataset_loader.py ./Data/Unified_Cloud_Dataset")
         sys.exit(1)
 
     data_dir = sys.argv[1]
 
-    # 示例1: 自动归一化 (推荐)
-    print("\n" + "="*60)
-    print("示例1: 自动归一化 (auto)")
-    print("="*60)
+    # 快速测试数据集加载
+    print("\n测试数据集加载:")
     dataset = UnifiedCloudDataset(
-        data_dir,
-        split="train",
-        bands=["B02", "B03", "B04", "B08"],
-        normalize="auto"
-    )
-    dataset.print_statistics()
-
-    image, label, info = dataset[0]
-    print(f"\n样本归一化后数值范围:")
-    print(f"  图像: [{image.min():.4f}, {image.max():.4f}]")
-    print(f"  均值: {image.mean():.4f}, 标准差: {image.std():.4f}")
-
-    # 示例2: TOA反射率归一化 (物理意义明确)
-    print("\n" + "="*60)
-    print("示例2: TOA反射率归一化 (reflectance)")
-    print("="*60)
-    dataset_refl = UnifiedCloudDataset(
-        data_dir,
-        split="train",
-        bands=["B02", "B03", "B04", "B08"],
-        normalize="reflectance",
-        datasets=["oncloudn", "cloud38", "cloud95"]
-    )
-    image_refl, _, _ = dataset_refl[0]
-    print(f"样本反射率值范围: [{image_refl.min():.4f}, {image_refl.max():.4f}]")
-
-    # 示例3: 标准分数归一化
-    print("\n" + "="*60)
-    print("示例3: 标准分数归一化 (standard)")
-    print("="*60)
-    dataset_std = UnifiedCloudDataset(
-        data_dir,
-        split="train",
-        bands=["B02", "B03", "B04", "B08"],
-        normalize="standard"
-    )
-    image_std, _, _ = dataset_std[0]
-    print(f"样本标准分数范围: [{image_std.min():.4f}, {image_std.max():.4f}]")
-    print(f"  均值: {image_std.mean():.4f}, 标准差: {image_std.std():.4f}")
-
-    # 示例4: 波段独立标准分数 (基于数据集统计)
-    print("\n" + "="*60)
-    print("示例4: 波段独立标准分数 (bandwise_standard)")
-    print("="*60)
-    dataset_bw = UnifiedCloudDataset(
-        data_dir,
-        split="train",
-        bands=["B02", "B03", "B04", "B08"],
-        normalize="bandwise_standard",
-        compute_stats=True,  # 预计算统计信息
-        max_samples=50       # 限制计算样本数以节省时间
-    )
-    image_bw, _, _ = dataset_bw[0]
-    print(f"样本标准分数范围: [{image_bw.min():.4f}, {image_bw.max():.4f}]")
-    print("\n归一化统计信息:")
-    norm_info = dataset_bw.get_normalization_info()
-    for ds, stats in norm_info.get("computed_stats", {}).items():
-        print(f"  {ds}: {list(stats.keys())}")
-
-    # 示例5: 百分位数归一化 (鲁棒归一化)
-    print("\n" + "="*60)
-    print("示例5: 百分位数归一化 (percentile)")
-    print("="*60)
-    dataset_pct = UnifiedCloudDataset(
         data_dir,
         split="train",
         bands=["B02", "B03", "B04", "B08"],
         normalize="percentile"
     )
-    image_pct, _, _ = dataset_pct[0]
-    print(f"样本归一化后范围: [{image_pct.min():.4f}, {image_pct.max():.4f}]")
+    dataset.print_statistics()
 
-    # 示例6: 不归一化 (原始DN值)
-    print("\n" + "="*60)
-    print("示例6: 不归一化 (none) - 原始DN值")
-    print("="*60)
-    dataset_raw = UnifiedCloudDataset(
-        data_dir,
-        split="train",
-        bands=["B02", "B03", "B04", "B08"],
-        normalize="none"
-    )
-    image_raw, _, _ = dataset_raw[0]
-    print(f"原始DN值范围: [{image_raw.min():.1f}, {image_raw.max():.1f}]")
-
-    # 示例7: 只加载多光谱数据集
-    print("\n" + "="*60)
-    print("示例7: 只加载多光谱数据集")
-    print("="*60)
-    dataset_ms = UnifiedCloudDataset(
-        data_dir,
-        split="train",
-        bands=["B02", "B03", "B04", "B08"],
-        datasets=["oncloudn", "cloud38", "cloud95"],
-        normalize="reflectance"
-    )
-    dataset_ms.print_statistics()
-
-    # 示例8: 使用get_dataloader便捷函数
-    print("\n" + "="*60)
-    print("示例8: 使用get_dataloader便捷函数")
-    print("="*60)
-    dataloader = get_dataloader(
-        data_dir,
-        split="train",
-        batch_size=4,
-        normalize="reflectance",
-        datasets=["oncloudn"],
-        num_workers=0  # 示例使用0避免多进程问题
-    )
-
-    # 获取一个批次
-    batch = next(iter(dataloader))
-    images, labels, infos = batch
-    print(f"批次形状: 图像={images.shape}, 标签={labels.shape}")
-    print(f"批次数值范围: [{images.min():.4f}, {images.max():.4f}]")
+    # 测试单个样本
+    image, label, info = dataset[0]
+    print(f"\n样本信息: id={info['id']}, dataset={info['dataset']}")
+    print(f"图像形状: {image.shape}, 范围: [{image.min():.4f}, {image.max():.4f}]")
+    print(f"标签形状: {label.shape}, 唯一值: {np.unique(label)}")
 
 
 # ==================== CloudAugmentation (从旧cloud_dataset.py迁移) ====================
