@@ -723,9 +723,9 @@ def create_mixed_dataloaders(config: dict, dev_run: bool = False):
     
     # Dev run: 限制数据集大小
     if dev_run:
-        train_samples = min(int(len(train_dataset) * 0.1), len(train_dataset))
-        val_samples = min(int(len(val_dataset) * 0.1), len(val_dataset))
-        test_samples = min(int(len(test_dataset) * 0.1), len(test_dataset))
+        train_samples = min(int(len(train_dataset) * 0.01), len(train_dataset))
+        val_samples = min(int(len(val_dataset) * 0.01), len(val_dataset))
+        test_samples = min(int(len(test_dataset) * 0.01), len(test_dataset))
         
         train_dataset = Subset(train_dataset, range(train_samples))
         val_dataset = Subset(val_dataset, range(val_samples))

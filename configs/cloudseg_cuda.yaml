@@ -7,10 +7,12 @@ model:
   num_classes: 2
 
   # 通道自适应输入模块
+  # CUDA推荐: hybrid（综合性能）或 attention（精度优先）
   channel_adaptive:
     enabled: true
+    method: conv            # conv / attention / physics / hybrid / transformer
     use_attention: true
-    method: conv
+    out_channels: 4
 
   # 编码器选择 - CUDA 上可使用更大的模型
   encoder:

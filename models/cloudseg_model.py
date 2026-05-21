@@ -21,118 +21,9 @@ from .builder import (
     build_semantic_enhancement,
     build_fusion,
     build_decoder,
-    build_loss
+    build_loss,
+    build_channel_adaptive
 )
-
-
-class ChannelAdaptiveInput(nn.Module):
-    """
-    通道自适应输入模块
-    
-    支持3通道(RGB)或4通道(RGB+NIR)输入，自适应学习各通道重要性权重。
-    当输入为3通道时，自动学习生成第4通道特征；当输入为4通道时，学习NIR通道质量。
-    
-    Args:
-        out_channels: 输出通道数（固定为4，对应RGB+NIR）
-        use_channel_attention: 是否使用通道注意力机制
-        adaptive_method: 自适应方法 ('conv' 或 'attention')
-    """
-    
-    def __init__(
-        self,
-        out_channels: int = 4,
-        use_channel_attention: bool = True,
-        adaptive_method: str = 'conv'
-    ):
-        super().__init__()
-        
-        self.out_channels = out_channels
-        self.use_channel_attention = use_channel_attention
-        self.adaptive_method = adaptive_method
-        
-        # 3通道到4通道的投影卷积（带可学习参数）
-        self.rgb_to_4ch = nn.Sequential(
-            nn.Conv2d(3, 64, 3, padding=1, bias=False),
-            nn.BatchNorm2d(64),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(64, out_channels, 3, padding=1, bias=False),
-            nn.BatchNorm2d(out_channels),
-        )
-        
-        # 4通道到4通道的 refine（学习通道质量）
-        self.refine_4ch = nn.Sequential(
-            nn.Conv2d(4, 64, 3, padding=1, bias=False),
-            nn.BatchNorm2d(64),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(64, out_channels, 3, padding=1, bias=False),
-            nn.BatchNorm2d(out_channels),
-        )
-        
-        # 通道注意力机制（学习各通道重要性）
-        if use_channel_attention:
-            self.channel_attention = nn.Sequential(
-                nn.AdaptiveAvgPool2d(1),
-                nn.Flatten(),
-                nn.Linear(out_channels, out_channels // 2),
-                nn.ReLU(inplace=True),
-                nn.Linear(out_channels // 2, out_channels),
-                nn.Sigmoid()
-            )
-        else:
-            # 简单的可学习通道权重
-            self.channel_weights = nn.Parameter(torch.ones(out_channels))
-        
-        # 残差连接权重
-        self.residual_weight = nn.Parameter(torch.tensor(0.5))
-        
-        print(f"[ChannelAdaptiveInput] Method: {adaptive_method}, CA: {use_channel_attention}")
-    
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """
-        自适应处理输入
-        
-        Args:
-            x: 输入 [B, C, H, W], C=3 或 4
-            
-        Returns:
-            out: 输出 [B, 4, H, W]（固定4通道）
-        """
-        in_channels = x.shape[1]
-        
-        if in_channels == 3:
-            # 3通道输入：通过卷积生成第4通道
-            transformed = self.rgb_to_4ch(x)
-            # 保留RGB信息作为残差
-            rgb_padded = F.pad(x, (0, 0, 0, 0, 0, 1), value=0)  # [B, 4, H, W] with NIR=0
-        elif in_channels == 4:
-            # 4通道输入：精炼所有通道
-            transformed = self.refine_4ch(x)
-            rgb_padded = x
-        else:
-            raise ValueError(f"Expected 3 or 4 channel input, got {in_channels}")
-        
-        # 残差连接：学习如何结合原始信息和变换后信息
-        out = torch.sigmoid(self.residual_weight) * transformed + (1 - torch.sigmoid(self.residual_weight)) * rgb_padded
-        
-        # 通道注意力/权重
-        if self.use_channel_attention:
-            # 全局池化后计算各通道权重
-            ca_weights = self.channel_attention(out)  # [B, 4]
-            ca_weights = ca_weights.view(ca_weights.size(0), ca_weights.size(1), 1, 1)
-            out = out * ca_weights
-        else:
-            # 简单通道权重
-            out = out * self.channel_weights.view(1, -1, 1, 1)
-        
-        return out
-    
-    def get_channel_weights(self) -> torch.Tensor:
-        """获取当前通道权重（用于分析）"""
-        if self.use_channel_attention:
-            # 返回训练过程中最后一个batch的平均权重
-            return None  # 动态计算，无法静态获取
-        else:
-            return self.channel_weights.detach()
 
 
 class CloudSenseNet(nn.Module):
@@ -164,14 +55,11 @@ class CloudSenseNet(nn.Module):
         self.expected_in_channels = 4 if data_cfg.get('use_nir', True) else 3
         
         if self.use_channel_adaptive:
-            self.channel_adaptive = ChannelAdaptiveInput(
-                out_channels=4,  # 统一输出4通道
-                use_channel_attention=adaptive_cfg.get('use_attention', True),
-                adaptive_method=adaptive_cfg.get('method', 'conv')
-            )
+            self.channel_adaptive = build_channel_adaptive(adaptive_cfg)
             # 编码器始终以4通道接收（自适应后）
-            encoder_in_channels = 4
-            print(f"[CloudSenseNet] Channel Adaptive: Enabled (input: {self.expected_in_channels}ch -> output: 4ch)")
+            encoder_in_channels = adaptive_cfg.get('out_channels', 4)
+            method = adaptive_cfg.get('method', 'conv')
+            print(f"[CloudSenseNet] Channel Adaptive: Enabled (method={method}, expect {self.expected_in_channels}ch -> output: {encoder_in_channels}ch)")
         else:
             self.channel_adaptive = None
             encoder_in_channels = self.expected_in_channels

@@ -7,10 +7,12 @@ model:
   num_classes: 2
 
   # 通道自适应输入模块
+  # MPS推荐: conv（轻量）或 physics（可解释性强）
   channel_adaptive:
     enabled: true
+    method: conv            # conv / attention / physics / hybrid / transformer
     use_attention: true
-    method: conv
+    out_channels: 4
 
   # 编码器选择 - MPS 上推荐 EfficientNet
   encoder:

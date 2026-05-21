@@ -5,6 +5,51 @@ import torch.nn as nn
 from typing import Dict, Any
 
 
+def build_channel_adaptive(config: Dict[str, Any]) -> nn.Module:
+    """
+    构建通道自适应输入模块
+    
+    Args:
+        config: 配置字典，包含:
+            - enabled: 是否启用
+            - method: 自适应方法 ('conv', 'attention', 'physics', 'hybrid', 'transformer')
+            - use_attention: 是否使用注意力（仅conv方法）
+            - out_channels: 输出通道数（默认4）
+    
+    Returns:
+        通道自适应模块实例，或None（如果disabled）
+    """
+    if not config.get('enabled', True):
+        return None
+    
+    method = config.get('method', 'conv')
+    out_channels = config.get('out_channels', 4)
+    
+    from .necks.channel_adaptive import (
+        ConvChannelAdaptive,
+        AttentionChannelAdaptive,
+        PhysicsChannelAdaptive,
+        HybridChannelAdaptive,
+        TransformerChannelAdaptive,
+    )
+    
+    if method == 'conv':
+        use_attention = config.get('use_attention', True)
+        return ConvChannelAdaptive(out_channels, use_attention)
+    elif method == 'attention':
+        return AttentionChannelAdaptive(out_channels)
+    elif method == 'physics':
+        return PhysicsChannelAdaptive(out_channels)
+    elif method == 'hybrid':
+        return HybridChannelAdaptive(out_channels)
+    elif method == 'transformer':
+        embed_dim = config.get('embed_dim', 32)
+        num_heads = config.get('num_heads', 2)
+        return TransformerChannelAdaptive(out_channels, embed_dim, num_heads)
+    else:
+        raise ValueError(f"Unknown channel adaptive method: {method}")
+
+
 def build_model(config: Dict[str, Any]) -> nn.Module:
     """根据配置构建完整的CloudSenseNet模型"""
     from .cloudseg_model import CloudSenseNet
