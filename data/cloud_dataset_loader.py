@@ -15,6 +15,7 @@ import rasterio
 from rasterio.errors import RasterioIOError
 import torch
 from torch.utils.data import Dataset
+from torchvision import transforms as T
 
 
 class UnifiedCloudDataset(Dataset):
@@ -484,8 +485,6 @@ class UnifiedCloudDataset(Dataset):
             dist[dataset] = dist.get(dataset, 0) + 1
         return dist
 
-
-# ==================== CloudAugmentation ====================
 
 class CloudAugmentation:
     """
