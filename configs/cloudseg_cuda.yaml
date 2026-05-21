@@ -6,6 +6,12 @@ model:
   name: "CloudSenseNet_CUDA"
   num_classes: 2
 
+  # 通道自适应输入模块
+  channel_adaptive:
+    enabled: true
+    use_attention: true
+    method: conv
+
   # 编码器选择 - CUDA 上可使用更大的模型
   encoder:
     type: "efficientnet"

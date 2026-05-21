@@ -106,7 +106,7 @@ def inference_single_image(
             image_array = np.array(image)
             # 简单的伪NIR生成：使用红色通道的增强版
             r, g, b = image_array[:, :, 0], image_array[:, :, 1], image_array[:, :, 2]
-            nir = (0.7 * r + 0.25 * g + 0.05 * b).astype(np.uint8)
+            nir = (0.1 * r + 0.25 * g + 0.65 * b).astype(np.uint8)
             image_4ch = np.stack([r, g, b, nir], axis=2)
             image_tensor = torch.from_numpy(image_4ch).permute(2, 0, 1).float().to(device) / 255.0
         else:

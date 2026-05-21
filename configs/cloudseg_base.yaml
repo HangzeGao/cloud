@@ -6,6 +6,12 @@ model:
   name: "CloudSenseNet"
   num_classes: 2
 
+  # 通道自适应输入模块（支持3/4通道自适应）
+  channel_adaptive:
+    enabled: true           # 启用通道自适应
+    use_attention: true     # 使用通道注意力
+    method: conv            # 自适应方法: 'conv' 或 'attention'
+
   # 编码器选择
   encoder:
     type: "efficientnet"

@@ -4,6 +4,7 @@ CloudSense-Net - 可配置的遥感云分割模型
 所有组件都支持可选开关，可灵活组合不同架构方案。
 
 架构层次：
+0. Channel Adaptive Input (通道自适应) - 支持3/4通道自适应
 1. Encoder (Backbone) - 4种可选
 2. Semantic Enhancement (可选) - 参考SkySense++的MSL
 3. Fusion Neck (可选) - FPN/BiFPN/ASPP
@@ -22,6 +23,116 @@ from .builder import (
     build_decoder,
     build_loss
 )
+
+
+class ChannelAdaptiveInput(nn.Module):
+    """
+    通道自适应输入模块
+    
+    支持3通道(RGB)或4通道(RGB+NIR)输入，自适应学习各通道重要性权重。
+    当输入为3通道时，自动学习生成第4通道特征；当输入为4通道时，学习NIR通道质量。
+    
+    Args:
+        out_channels: 输出通道数（固定为4，对应RGB+NIR）
+        use_channel_attention: 是否使用通道注意力机制
+        adaptive_method: 自适应方法 ('conv' 或 'attention')
+    """
+    
+    def __init__(
+        self,
+        out_channels: int = 4,
+        use_channel_attention: bool = True,
+        adaptive_method: str = 'conv'
+    ):
+        super().__init__()
+        
+        self.out_channels = out_channels
+        self.use_channel_attention = use_channel_attention
+        self.adaptive_method = adaptive_method
+        
+        # 3通道到4通道的投影卷积（带可学习参数）
+        self.rgb_to_4ch = nn.Sequential(
+            nn.Conv2d(3, 64, 3, padding=1, bias=False),
+            nn.BatchNorm2d(64),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(64, out_channels, 3, padding=1, bias=False),
+            nn.BatchNorm2d(out_channels),
+        )
+        
+        # 4通道到4通道的 refine（学习通道质量）
+        self.refine_4ch = nn.Sequential(
+            nn.Conv2d(4, 64, 3, padding=1, bias=False),
+            nn.BatchNorm2d(64),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(64, out_channels, 3, padding=1, bias=False),
+            nn.BatchNorm2d(out_channels),
+        )
+        
+        # 通道注意力机制（学习各通道重要性）
+        if use_channel_attention:
+            self.channel_attention = nn.Sequential(
+                nn.AdaptiveAvgPool2d(1),
+                nn.Flatten(),
+                nn.Linear(out_channels, out_channels // 2),
+                nn.ReLU(inplace=True),
+                nn.Linear(out_channels // 2, out_channels),
+                nn.Sigmoid()
+            )
+        else:
+            # 简单的可学习通道权重
+            self.channel_weights = nn.Parameter(torch.ones(out_channels))
+        
+        # 残差连接权重
+        self.residual_weight = nn.Parameter(torch.tensor(0.5))
+        
+        print(f"[ChannelAdaptiveInput] Method: {adaptive_method}, CA: {use_channel_attention}")
+    
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        自适应处理输入
+        
+        Args:
+            x: 输入 [B, C, H, W], C=3 或 4
+            
+        Returns:
+            out: 输出 [B, 4, H, W]（固定4通道）
+        """
+        in_channels = x.shape[1]
+        
+        if in_channels == 3:
+            # 3通道输入：通过卷积生成第4通道
+            transformed = self.rgb_to_4ch(x)
+            # 保留RGB信息作为残差
+            rgb_padded = F.pad(x, (0, 0, 0, 0, 0, 1), value=0)  # [B, 4, H, W] with NIR=0
+        elif in_channels == 4:
+            # 4通道输入：精炼所有通道
+            transformed = self.refine_4ch(x)
+            rgb_padded = x
+        else:
+            raise ValueError(f"Expected 3 or 4 channel input, got {in_channels}")
+        
+        # 残差连接：学习如何结合原始信息和变换后信息
+        out = torch.sigmoid(self.residual_weight) * transformed + (1 - torch.sigmoid(self.residual_weight)) * rgb_padded
+        
+        # 通道注意力/权重
+        if self.use_channel_attention:
+            # 全局池化后计算各通道权重
+            ca_weights = self.channel_attention(out)  # [B, 4]
+            ca_weights = ca_weights.view(ca_weights.size(0), ca_weights.size(1), 1, 1)
+            out = out * ca_weights
+        else:
+            # 简单通道权重
+            out = out * self.channel_weights.view(1, -1, 1, 1)
+        
+        return out
+    
+    def get_channel_weights(self) -> torch.Tensor:
+        """获取当前通道权重（用于分析）"""
+        if self.use_channel_attention:
+            # 返回训练过程中最后一个batch的平均权重
+            return None  # 动态计算，无法静态获取
+        else:
+            return self.channel_weights.detach()
 
 
 class CloudSenseNet(nn.Module):
@@ -43,6 +154,29 @@ class CloudSenseNet(nn.Module):
         # 基本配置
         self.num_classes = model_cfg.get('num_classes', 2)
         
+        # ===== 0. 通道自适应输入模块 =====
+        data_cfg = config.get('data', {})
+        # 从配置读取是否启用通道自适应
+        adaptive_cfg = model_cfg.get('channel_adaptive', {})
+        self.use_channel_adaptive = adaptive_cfg.get('enabled', True)
+        
+        # 期望的输入通道数（训练时配置）
+        self.expected_in_channels = 4 if data_cfg.get('use_nir', True) else 3
+        
+        if self.use_channel_adaptive:
+            self.channel_adaptive = ChannelAdaptiveInput(
+                out_channels=4,  # 统一输出4通道
+                use_channel_attention=adaptive_cfg.get('use_attention', True),
+                adaptive_method=adaptive_cfg.get('method', 'conv')
+            )
+            # 编码器始终以4通道接收（自适应后）
+            encoder_in_channels = 4
+            print(f"[CloudSenseNet] Channel Adaptive: Enabled (input: {self.expected_in_channels}ch -> output: 4ch)")
+        else:
+            self.channel_adaptive = None
+            encoder_in_channels = self.expected_in_channels
+            print(f"[CloudSenseNet] Channel Adaptive: Disabled")
+        
         # ===== 1. 编码器 (必选) =====
         encoder_cfg = model_cfg['encoder']
         self.encoder_type = encoder_cfg.get('type', 'convnext')
@@ -50,16 +184,11 @@ class CloudSenseNet(nn.Module):
         
         assert self.encoder_enabled, "Encoder must be enabled"
         
-        # 从数据配置获取输入通道数 (3=RGB, 4=RGB+NIR)
-        data_cfg = config.get('data', {})
-        self.in_channels = 4 if data_cfg.get('use_nir', True) else 3
-        
-        # 构建编码器（传递 in_channels 参数）
-        self.encoder = build_backbone(self.encoder_type, encoder_cfg, in_channels=self.in_channels)
+        # 构建编码器（传递统一的 in_channels 参数）
+        self.encoder = build_backbone(self.encoder_type, encoder_cfg, in_channels=encoder_in_channels)
         self.encoder_channels = self.encoder.get_feature_channels()
         
-        print(f"[CloudSenseNet] Input channels: {self.in_channels} ({'RGB+NIR' if self.in_channels == 4 else 'RGB only'})")
-        
+        print(f"[CloudSenseNet] Encoder input: {encoder_in_channels}ch, Expected input: {self.expected_in_channels}ch")
         print(f"[CloudSenseNet] Encoder: {self.encoder_type}")
         print(f"[CloudSenseNet] Encoder channels: {self.encoder_channels}")
         
@@ -147,6 +276,20 @@ class CloudSenseNet(nn.Module):
         
         # 保存输入尺寸用于最终上采样
         input_size = x.shape[-2:]
+        
+        # 记录实际输入通道数
+        actual_in_channels = x.shape[1]
+        
+        # ===== 0. 通道自适应 =====
+        if self.use_channel_adaptive:
+            # 无论输入是3通道还是4通道，都通过自适应模块
+            x = self.channel_adaptive(x)
+        elif actual_in_channels != self.expected_in_channels:
+            # 无自适应时，检查通道数是否匹配
+            raise ValueError(
+                f"Input channels ({actual_in_channels}) != Expected channels ({self.expected_in_channels}). "
+                f"Enable channel_adaptive in config or provide correct input."
+            )
         
         # ===== 1. 编码器 =====
         features = self.encoder(x)
@@ -256,6 +399,8 @@ class CloudSenseNet(nn.Module):
         info = {
             'encoder_type': self.encoder_type,
             'encoder_channels': self.encoder_channels,
+            'use_channel_adaptive': self.use_channel_adaptive,
+            'expected_in_channels': self.expected_in_channels,
             'use_semantic_enhancement': self.use_semantic_enhancement,
             'use_fusion': self.use_fusion,
             'fusion_type': self.fusion_type if self.use_fusion else None,
@@ -291,6 +436,7 @@ class CloudSenseNet(nn.Module):
         print("\n" + "="*60)
         print("CloudSense-Net Architecture Summary")
         print("="*60)
+        print(f"Channel Adaptive:  {'✓' if info['use_channel_adaptive'] else '✗'} (expect {info['expected_in_channels']}ch, adapt to 4ch)")
         print(f"Encoder:           {info['encoder_type']} ({info['encoder_channels']})")
         print(f"Semantic Enhancement: {'✓' if info['use_semantic_enhancement'] else '✗'}")
         print(f"Fusion:            {'✓ ' + info['fusion_type'] if info['use_fusion'] else '✗'}")
