@@ -63,12 +63,12 @@ class EfficientNetBackbone(BaseBackbone):
         self.feature_channels = EFFICIENTNET_CHANNELS[model_name]
         self.strides = [4, 8, 16, 32]
 
-        # 使用 timm 创建模型
+        # 使用 timm 创建模型，features_only=True 返回5个尺度特征 (stem + 4 blocks)
         self.model = create_model(
             model_name,
             pretrained=pretrained,
-            features_only=True,  # 返回多尺度特征
-            out_indices=[1, 2, 4, 6],  # 对应 1/4, 1/8, 1/16, 1/32
+            features_only=True,
+            out_indices=[1, 2, 3, 4],  # 跳过 Level 0，去掉 stride=2 的浅层特征，减少计算量，且与检测/分割 FPN 对齐
             in_chans=in_channels,
         )
 
