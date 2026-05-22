@@ -19,6 +19,9 @@ ENV/
 *.swp
 *.swo
 
+# Memory analysis
+analysis/
+
 # Model checkpoints and logs
 experiments/
 experiments_*/

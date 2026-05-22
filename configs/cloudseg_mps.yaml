@@ -10,7 +10,7 @@ model:
   # MPS推荐: conv（轻量）或 physics（可解释性强）
   channel_adaptive:
     enabled: true
-    method: physics            # conv / attention / physics / hybrid / transformer
+    method: physics     # conv / attention / physics / hybrid / transformer
     use_attention: true
     out_channels: 4
 
@@ -19,29 +19,38 @@ model:
     type: "efficientnet"
     enabled: true
     efficientnet:
-      model_name: "efficientnet_b3"
+      model_name: "efficientnet_b0"
       pretrained: true
 
   # 语义增强模块
   semantic_enhancement:
-    enabled: true
+    enabled: false
     vocabulary_size: 2
     patch_size: 16
-    embed_dim: 768
+    embed_dim: 256
     merge_stage: 0
 
   # 特征融合层
   fusion:
     enabled: true
-    type: "fpn"
-    fpn:
+    type: "bifpn"
+    bifpn:
       out_channels: 256
-      num_levels: 4
+#      num_levels: 4
+      num_iterations: 2
 
-  # 解码器选择 - SegFormer 轻量高效
+  # 解码器选择 - UNet++
   decoder:
     type: "unetpp"
     enabled: true
+    unetpp:
+      deep_supervision: false
+      use_cbam: false
+
+  # 解码器选择 - SegFormer 轻量高效
+#  decoder:
+#    type: "segformer"
+#    enabled: true
 #    segformer:
 #      embed_dim: 256
 
@@ -57,11 +66,17 @@ training:
   # M2 Pro (16GB): batch_size=8
   # M2 Max (32GB): batch_size=16
   batch_size: 4
-  num_epochs: 5
+  num_epochs: 15
   num_workers: 0
   
   # 早停耐心值 (0 = 禁用早停)
-  patience: 3
+  patience: 5
+
+  # 梯度累积
+  # 模拟 batch_size=8 的效果，但显存占用保持4
+  gradient_accumulation:
+    enabled: true
+    steps: 2            # 每2步更新一次参数
   
   # MPS 混合精度支持有限，建议禁用
   amp:
@@ -92,6 +107,11 @@ training:
     contrast: 0.2
     gaussian_noise: 0.01
 
+  # 显存管理
+  memory:
+    empty_cache_every_n_batches: 50   # 每50批次清理一次缓存
+    monitor_interval: 10              # 每10批次打印显存状态
+
 # ==================== MPS 优化数据集配置 ====================
 data:
   unified_data_dir: "./Data/Unified_Cloud_Dataset"
@@ -106,25 +126,53 @@ data:
   use_nir: true
   
   # nir_method: 伪NIR生成方法 (MPS推荐'guided'保持边缘或'ensemble'综合)
+  # 可选: 'physical' | 'vegetation' | 'guided' | 'context' | 'ensemble'
   nir_method: 'guided'
   
-  # normalize: 归一化方法 ('percentile', 'minmax', 'standard', 'reflectance', 'none')
+  # normalize: 训练时归一化方法 ('percentile', 'minmax', 'standard', 'reflectance', 'none')
   normalize: 'percentile'
+  
+  # ==================== 推理阶段归一化配置 ====================
+  # inference_normalization: 推理时动态归一化方法
+  #   - null: 不使用推理归一化（仅使用训练时的归一化）
+  #   - 'adaptive': 自适应归一化（自动选择最佳方法）★推荐
+  #   - 'robust': 稳健归一化（基于分位数，抗云层/阴影异常值）
+  #   - 'standard': Z-score标准化
+  #   - 'windowed': 窗口化局部归一化（处理光照不均）
+  #   - 'log_scaling': 对数缩放（高动态范围图像）
+  #   - 'minmax': 简单Min-Max归一化
+  inference_normalization: 'adaptive'
+  
+  # inference_norm_params: 推理归一化参数
+  inference_norm_params:
+    # adaptive: 自适应参数
+    auto_select: true
+    # robust: 稳健归一化参数
+    # lower_percentile: 2.0
+    # upper_percentile: 98.0
+    # clip: true
+    # windowed: 窗口归一化参数
+    # window_size: 64
+    # method: 'mean_std'
   
   val_test_split:
     enabled: true
     train_ratio: 0.75
-    val_ratio: 0.15
-    test_ratio: 0.10
+    val_ratio: 0.25
+    test_ratio: 0.0
     seed: 42
     stratify: true
 
 # ==================== 推理配置 ====================
 inference:
-  mode: "sliding_window"
+  mode: "sliding_window"    # sliding_window | multi_scale | whole | simple
   window_size: 512
   stride: 256
   scales: [0.5, 1.0, 1.5]
+  
+  # 推理归一化设置（优先级高于data.inference_normalization）
+  # auto_recommend: 自动分析图像特征并推荐最佳归一化方法
+  auto_recommend: false
 
 # ==================== 实验配置 ====================
 experiment:
@@ -139,9 +187,18 @@ experiment:
 # 1. 训练: python3 train.py --config configs/cloudseg_mps.yaml --device mps
 # 2. 评估: python3 eval.py --checkpoint experiments_mps/best_model.pth --device mps
 # 3. 推理: python3 inference.py --checkpoint experiments_mps/best_model.pth --device mps
+# 4. 自动归一化推理: python3 inference.py --checkpoint ... --input ... --output ... --auto_norm
+# 5. 指定归一化方法: python3 inference.py --checkpoint ... --normalization robust
 #
 # MPS 优化建议:
 # - 使用 --device auto 自动检测 MPS
 # - batch_size 根据 Mac 内存调整: M2(8GB)->4, M2 Pro(16GB)->8, M2 Max(32GB)->16
 # - 避免使用 Swin Transformer（在 MPS 上性能不佳）
 # - 推荐使用 ConvNeXt 或 EfficientNet
+#
+# 推理归一化建议:
+# - 云层/阴影较多时: 使用 'robust' 归一化（抗异常值）
+# - 光照不均时: 使用 'windowed' 局部归一化
+# - 高动态范围卫星图: 使用 'log_scaling' 对数缩放
+# - 不确定场景: 使用 '--auto_norm' 自动推荐
+# - 常规场景: 使用 'adaptive' 自适应归一化（默认）
