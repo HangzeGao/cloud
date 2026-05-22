@@ -1,14 +1,38 @@
 """
-ConvNeXt Backbone - 现代CNN架构，支持任意尺寸输入
+ConvNeXt Backbone - 使用 timm 真实模型
+现代CNN架构，支持任意尺寸输入
 """
 import torch
 import torch.nn as nn
 from .base_backbone import BaseBackbone
 
+try:
+    import timm
+    from timm import create_model
+    TIMM_AVAILABLE = True
+except ImportError:
+    TIMM_AVAILABLE = False
+
+
+# ConvNeXt 各变体的配置
+CONVNEXT_CHANNELS = {
+    'convnext_tiny': [96, 192, 384, 768],
+    'convnext_small': [96, 192, 384, 768],
+    'convnext_base': [128, 256, 512, 1024],
+    'convnext_large': [192, 384, 768, 1536],
+    'convnext_large_mlp': [192, 384, 768, 1536],
+    'convnext_xlarge': [256, 512, 1024, 2048],
+    'convnextv2_tiny': [96, 192, 384, 768],
+    'convnextv2_small': [96, 192, 384, 768],
+    'convnextv2_base': [128, 256, 512, 1024],
+    'convnextv2_large': [192, 384, 768, 1536],
+    'convnextv2_huge': [352, 704, 1408, 2816],
+}
+
 
 class ConvNeXtBackbone(BaseBackbone):
     """
-    ConvNeXt Backbone
+    ConvNeXt Backbone - 使用 timm 真实模型
     结合了Transformer的设计理念与CNN的效率
     输出多尺度特征 [1/4, 1/8, 1/16, 1/32]
     """
@@ -24,28 +48,37 @@ class ConvNeXtBackbone(BaseBackbone):
 
         self.model_name = model_name
 
-        # ConvNeXt-Tiny 标准通道数
-        self.feature_channels = [96, 192, 384, 768]
+        if not TIMM_AVAILABLE:
+            raise ImportError(
+                "timm is required for ConvNeXt backbone. "
+                "Install with: pip install timm"
+            )
+
+        # 验证模型名称
+        if model_name not in CONVNEXT_CHANNELS:
+            valid_models = list(CONVNEXT_CHANNELS.keys())
+            raise ValueError(
+                f"Unknown ConvNeXt model: {model_name}. "
+                f"Valid models: {valid_models}"
+            )
+
+        self.feature_channels = CONVNEXT_CHANNELS[model_name]
         self.strides = [4, 8, 16, 32]
 
-        # 创建简单的下采样层来模拟多尺度特征
-        self.stages = nn.ModuleList()
-        in_ch = in_channels
+        # 使用 timm 创建模型
+        self.model = create_model(
+            model_name,
+            pretrained=pretrained,
+            features_only=True,
+            out_indices=[1, 2, 3, 4],  # 4个stage的输出
+            in_chans=in_channels,
+            drop_path_rate=drop_path_rate,
+        )
 
-        for out_ch in self.feature_channels:
-            stage = nn.Sequential(
-                nn.Conv2d(in_ch, out_ch, 3, stride=2, padding=1, bias=False),
-                nn.BatchNorm2d(out_ch),
-                nn.ReLU(inplace=True),
-                nn.Conv2d(out_ch, out_ch, 3, padding=1, bias=False),
-                nn.BatchNorm2d(out_ch),
-                nn.ReLU(inplace=True)
-            )
-            self.stages.append(stage)
-            in_ch = out_ch
-
-        print(f"[ConvNeXtBackbone] {model_name} (simulated)")
+        print(f"[ConvNeXtBackbone] {model_name} loaded from timm")
         print(f"[ConvNeXtBackbone] Feature channels: {self.feature_channels}")
+        print(f"[ConvNeXtBackbone] Drop path rate: {drop_path_rate}")
+        print(f"[ConvNeXtBackbone] Pretrained: {pretrained}")
 
     def forward(self, x: torch.Tensor) -> list:
         """
@@ -54,13 +87,7 @@ class ConvNeXtBackbone(BaseBackbone):
         Returns:
             features: [c2, c3, c4, c5] 对应 1/4, 1/8, 1/16, 1/32
         """
-        features = []
-        curr = x
-
-        for i, stage in enumerate(self.stages):
-            curr = stage(curr)
-            features.append(curr)
-
+        features = self.model(x)
         return features
 
     def get_feature_channels(self) -> list:

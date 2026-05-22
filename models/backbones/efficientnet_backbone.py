@@ -1,14 +1,37 @@
 """
-EfficientNet Backbone - 高效轻量
+EfficientNet Backbone - 使用 timm 真实模型
+高效轻量，支持多种变体 (B0-B7)
 """
 import torch
 import torch.nn as nn
 from .base_backbone import BaseBackbone
 
+try:
+    import timm
+    from timm import create_model
+    TIMM_AVAILABLE = True
+except ImportError:
+    TIMM_AVAILABLE = False
+
+
+# EfficientNet 各变体的特征通道配置
+EFFICIENTNET_CHANNELS = {
+    'efficientnet_b0': [24, 40, 112, 320],
+    'efficientnet_b1': [24, 40, 112, 320],
+    'efficientnet_b2': [24, 48, 120, 352],
+    'efficientnet_b3': [32, 48, 136, 384],
+    'efficientnet_b4': [32, 56, 160, 448],
+    'efficientnet_b5': [40, 64, 176, 512],
+    'efficientnet_b6': [40, 72, 200, 576],
+    'efficientnet_b7': [48, 80, 224, 640],
+    'efficientnet_b8': [48, 88, 248, 704],
+    'efficientnet_l2': [72, 104, 272, 800],
+}
+
 
 class EfficientNetBackbone(BaseBackbone):
     """
-    EfficientNet Backbone
+    EfficientNet Backbone - 使用 timm 真实模型
     轻量高效，适合部署
     输出多尺度特征 [1/4, 1/8, 1/16, 1/32]
     """
@@ -23,37 +46,35 @@ class EfficientNetBackbone(BaseBackbone):
 
         self.model_name = model_name
 
-        # EfficientNet-B3 标准通道数
-        self.feature_channels = [24, 32, 48, 384]
+        if not TIMM_AVAILABLE:
+            raise ImportError(
+                "timm is required for EfficientNet backbone. "
+                "Install with: pip install timm"
+            )
+
+        # 验证模型名称
+        if model_name not in EFFICIENTNET_CHANNELS:
+            valid_models = list(EFFICIENTNET_CHANNELS.keys())
+            raise ValueError(
+                f"Unknown EfficientNet model: {model_name}. "
+                f"Valid models: {valid_models}"
+            )
+
+        self.feature_channels = EFFICIENTNET_CHANNELS[model_name]
         self.strides = [4, 8, 16, 32]
 
-        # 创建简单的下采样层
-        self.stages = nn.ModuleList()
-        in_ch = in_channels
+        # 使用 timm 创建模型
+        self.model = create_model(
+            model_name,
+            pretrained=pretrained,
+            features_only=True,  # 返回多尺度特征
+            out_indices=[1, 2, 4, 6],  # 对应 1/4, 1/8, 1/16, 1/32
+            in_chans=in_channels,
+        )
 
-        for i, out_ch in enumerate(self.feature_channels):
-            if i == 0:
-                # 第一层
-                stage = nn.Sequential(
-                    nn.Conv2d(in_ch, out_ch, 3, stride=2, padding=1, bias=False),
-                    nn.BatchNorm2d(out_ch),
-                    nn.ReLU(inplace=True)
-                )
-            else:
-                # 后续层
-                stage = nn.Sequential(
-                    nn.Conv2d(in_ch, out_ch, 3, stride=2, padding=1, bias=False),
-                    nn.BatchNorm2d(out_ch),
-                    nn.ReLU(inplace=True),
-                    nn.Conv2d(out_ch, out_ch, 3, padding=1, bias=False),
-                    nn.BatchNorm2d(out_ch),
-                    nn.ReLU(inplace=True)
-                )
-            self.stages.append(stage)
-            in_ch = out_ch
-
-        print(f"[EfficientNetBackbone] {model_name} (simulated)")
+        print(f"[EfficientNetBackbone] {model_name} loaded from timm")
         print(f"[EfficientNetBackbone] Feature channels: {self.feature_channels}")
+        print(f"[EfficientNetBackbone] Pretrained: {pretrained}")
 
     def forward(self, x: torch.Tensor) -> list:
         """
@@ -62,13 +83,8 @@ class EfficientNetBackbone(BaseBackbone):
         Returns:
             features: [c2, c3, c4, c5] 对应 1/4, 1/8, 1/16, 1/32
         """
-        features = []
-        curr = x
-
-        for stage in self.stages:
-            curr = stage(curr)
-            features.append(curr)
-
+        # timm 的 features_only=True 返回多尺度特征列表
+        features = self.model(x)
         return features
 
     def get_feature_channels(self) -> list:

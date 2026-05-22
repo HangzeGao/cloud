@@ -201,7 +201,7 @@ class BoundaryLoss(nn.Module):
             pred: [B, num_classes, H, W]
             target: [B, H, W]
         """
-        # 简化的边界损失（基于梯度）
+        # 边界损失：基于 Sobel 梯度算子计算边缘差异
         pred_prob = torch.sigmoid(pred)
         
         # Sobel算子计算边缘
@@ -222,7 +222,7 @@ class BoundaryLoss(nn.Module):
             grad_y = F.conv2d(pred_c, sobel_y, padding=1)
             pred_edge = torch.sqrt(grad_x ** 2 + grad_y ** 2 + 1e-8)
             
-            # 计算目标的边缘（简化版）
+            # 计算目标边缘的梯度
             target_c = (target == c).float().unsqueeze(1)
             target_grad_x = F.conv2d(target_c, sobel_x, padding=1)
             target_grad_y = F.conv2d(target_c, sobel_y, padding=1)

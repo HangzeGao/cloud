@@ -178,7 +178,7 @@ class LightASPP(nn.Module):
     ):
         super().__init__()
         
-        # 简化的ASPP：减少分支
+        # 轻量级 ASPP：减少空洞卷积分支数量
         self.conv_1x1 = nn.Sequential(
             nn.Conv2d(in_channels, out_channels // 2, 1, bias=False),
             nn.BatchNorm2d(out_channels // 2),

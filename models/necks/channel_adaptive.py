@@ -286,19 +286,21 @@ class TransformerChannelAdaptive(BaseChannelAdaptive):
     """
     Transformer方式 - 全局建模能力强
     轻量级Vision Transformer处理通道关系
+    支持3通道和4通道输入
     """
-    
+
     def __init__(self, out_channels: int = 4, embed_dim: int = 32, num_heads: int = 2):
         super().__init__(out_channels)
-        
+
         self.embed_dim = embed_dim
-        
-        # Patch embedding (将图像分块)
-        self.patch_embed = nn.Conv2d(3, embed_dim, kernel_size=4, stride=4)
-        
-        # 位置编码
-        self.pos_embed = nn.Parameter(torch.randn(1, 256, embed_dim) * 0.02)
-        
+
+        # 输入投影：支持3通道和4通道
+        self.input_proj_3ch = nn.Conv2d(3, embed_dim, kernel_size=4, stride=4)
+        self.input_proj_4ch = nn.Conv2d(4, embed_dim, kernel_size=4, stride=4)
+
+        # 位置编码（动态调整大小）
+        self.pos_embed = nn.Parameter(torch.randn(1, 4096, embed_dim) * 0.02)
+
         # Transformer encoder
         encoder_layer = nn.TransformerEncoderLayer(
             d_model=embed_dim,
@@ -308,45 +310,47 @@ class TransformerChannelAdaptive(BaseChannelAdaptive):
             batch_first=True
         )
         self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=2)
-        
+
         # 输出投影
         self.output_proj = nn.Sequential(
             nn.Conv2d(embed_dim, 64, 1),
             nn.ReLU(inplace=True),
             nn.Conv2d(64, out_channels, 1),
         )
-        
+
         # 上采样
         self.upsample = nn.Upsample(scale_factor=4, mode='bilinear', align_corners=False)
-    
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         B, C, H, W = x.shape
-        
-        # 如果是4通道输入，先投影到3通道
+
+        # 根据输入通道数选择投影层
         if C == 4:
-            x = x[:, :3, :, :]  # 简化：取RGB
-        
-        # Patch embedding
-        x = self.patch_embed(x)  # [B, embed_dim, H//4, W//4]
-        
+            x = self.input_proj_4ch(x)  # [B, embed_dim, H//4, W//4]
+        elif C == 3:
+            x = self.input_proj_3ch(x)  # [B, embed_dim, H//4, W//4]
+        else:
+            raise ValueError(f"TransformerChannelAdaptive expects 3 or 4 input channels, got {C}")
+
         # 展平为序列
         B, C_emb, H_p, W_p = x.shape
         x = x.flatten(2).transpose(1, 2)  # [B, H_p*W_p, C_emb]
-        
-        # 添加位置编码
-        if x.size(1) <= self.pos_embed.size(1):
-            x = x + self.pos_embed[:, :x.size(1), :]
-        
+        num_patches = x.size(1)
+
+        # 添加位置编码（动态截取）
+        if num_patches <= self.pos_embed.size(1):
+            x = x + self.pos_embed[:, :num_patches, :]
+
         # Transformer编码
         x = self.transformer(x)
-        
+
         # 恢复空间维度
         x = x.transpose(1, 2).view(B, C_emb, H_p, W_p)
-        
+
         # 输出投影
         x = self.output_proj(x)
-        
+
         # 上采样回原尺寸
         x = self.upsample(x)
-        
+
         return x

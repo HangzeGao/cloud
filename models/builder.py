@@ -76,6 +76,9 @@ def build_backbone(backbone_type: str, config: Dict[str, Any], in_channels: int 
     elif backbone_type == "resnet":
         from .backbones.resnet_backbone import ResNetBackbone
         return ResNetBackbone(in_channels=in_channels, **config.get('resnet', {}))
+    elif backbone_type == "resnext":
+        from .backbones.resnet_backbone import ResNeXtBackbone
+        return ResNeXtBackbone(in_channels=in_channels, **config.get('resnext', {}))
     else:
         raise ValueError(f"Unknown backbone type: {backbone_type}")
 
@@ -89,16 +92,39 @@ def build_semantic_enhancement(config: Dict[str, Any]) -> nn.Module:
 
 
 def build_fusion(fusion_type: str, config: Dict[str, Any], in_channels: list) -> nn.Module:
-    """构建特征融合层"""
+    """构建特征融合层
+
+    支持的融合类型:
+    - fpn: 特征金字塔网络
+    - fpnv2: 改进版 FPN
+    - bifpn: 双向特征金字塔
+    - fastbifpn: 快速 BiFPN
+    - aspp: 空洞空间金字塔池化
+    - asppv2: 改进版 ASPP
+    - lightaspp: 轻量级 ASPP
+    - none: 不使用融合
+    """
     if fusion_type == "fpn":
         from .necks.fpn_fusion import FPNFusion
         return FPNFusion(in_channels=in_channels, **config.get('fpn', {}))
+    elif fusion_type == "fpnv2":
+        from .necks.fpn_fusion import FPNFusionV2
+        return FPNFusionV2(in_channels=in_channels, **config.get('fpnv2', {}))
     elif fusion_type == "bifpn":
         from .necks.bifpn_fusion import BiFPNFusion
         return BiFPNFusion(in_channels=in_channels, **config.get('bifpn', {}))
+    elif fusion_type == "fastbifpn":
+        from .necks.bifpn_fusion import FastBiFPN
+        return FastBiFPN(in_channels=in_channels, **config.get('fastbifpn', {}))
     elif fusion_type == "aspp":
         from .necks.aspp_fusion import ASPPFusion
         return ASPPFusion(in_channels=in_channels[-1], **config.get('aspp', {}))
+    elif fusion_type == "asppv2":
+        from .necks.aspp_fusion import ASPPFusionV2
+        return ASPPFusionV2(in_channels=in_channels[-1], **config.get('asppv2', {}))
+    elif fusion_type == "lightaspp":
+        from .necks.aspp_fusion import LightASPP
+        return LightASPP(in_channels=in_channels[-1], **config.get('lightaspp', {}))
     elif fusion_type == "none" or fusion_type is None:
         return None
     else:
@@ -121,7 +147,10 @@ def build_decoder(decoder_type: str, config: Dict[str, Any], encoder_channels: l
         return UperNetDecoder(encoder_channels=encoder_channels, **config.get('upernet', {}))
     elif decoder_type == "simple":
         from .decoders.upernet_decoder import SimpleDecoder
-        return SimpleDecoder(encoder_channels=encoder_channels)
+        return SimpleDecoder(
+            encoder_channels=encoder_channels,
+            **config.get('simple', {})
+        )
     else:
         raise ValueError(f"Unknown decoder type: {decoder_type}")
 

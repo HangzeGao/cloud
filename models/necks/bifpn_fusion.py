@@ -189,14 +189,14 @@ class FastBiFPN(nn.Module):
         
         self.out_channels = out_channels
         
-        # 简化的投影
+        # 输入特征投影到统一通道数
         self.input_projections = nn.ModuleList()
         for in_ch in in_channels:
             self.input_projections.append(
                 nn.Conv2d(in_ch, out_channels, 1)
             )
         
-        # 简化的融合（使用标准FPN风格，但可学习权重）
+        # 加权特征融合
         self.fusion_weights = nn.Parameter(torch.ones(len(in_channels)))
         
         # 输出卷积

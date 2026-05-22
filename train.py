@@ -84,18 +84,25 @@ class TrainingConfig:
     # 早停
     patience: int = 0
 
+    # 混合精度训练 (AMP)
+    use_amp: bool = False
+    amp_dtype: str = "float16"
+
     @classmethod
     def from_dict(cls, config: Dict[str, Any]) -> 'TrainingConfig':
         """从配置字典创建"""
         grad_accum = config.get('training', {}).get('gradient_accumulation', {})
         memory = config.get('training', {}).get('memory', {})
+        amp_config = config.get('training', {}).get('amp', {})
 
         return cls(
             use_grad_accum=grad_accum.get('enabled', False),
             accum_steps=grad_accum.get('steps', 1) if grad_accum.get('enabled', False) else 1,
             empty_cache_every_n=memory.get('empty_cache_every_n_batches', 0),
             monitor_interval=memory.get('monitor_interval', 0),
-            patience=config['training'].get('patience', 0)
+            patience=config['training'].get('patience', 0),
+            use_amp=amp_config.get('enabled', False),
+            amp_dtype=amp_config.get('dtype', 'float16')
         )
 
 
@@ -266,6 +273,51 @@ class OptimizerFactory:
         return optimizer
 
 
+class WarmupScheduler:
+    """带 warmup 的学习率调度器包装器"""
+
+    def __init__(
+        self,
+        optimizer: optim.Optimizer,
+        warmup_steps: int,
+        base_scheduler: optim.lr_scheduler._LRScheduler
+    ):
+        self.optimizer = optimizer
+        self.warmup_steps = warmup_steps
+        self.base_scheduler = base_scheduler
+        self.current_step = 0
+
+        # 保存初始学习率
+        self.base_lrs = [group['lr'] for group in optimizer.param_groups]
+
+    def step(self, epoch=None):
+        self.current_step += 1
+
+        if self.current_step <= self.warmup_steps:
+            # warmup 阶段：线性增加学习率
+            warmup_factor = self.current_step / self.warmup_steps
+            for i, group in enumerate(self.optimizer.param_groups):
+                group['lr'] = self.base_lrs[i] * warmup_factor
+        else:
+            # warmup 结束后：使用基础调度器
+            if epoch is not None:
+                self.base_scheduler.step(epoch)
+            else:
+                self.base_scheduler.step()
+
+    def state_dict(self):
+        return {
+            'current_step': self.current_step,
+            'base_scheduler': self.base_scheduler.state_dict(),
+            'base_lrs': self.base_lrs
+        }
+
+    def load_state_dict(self, state_dict):
+        self.current_step = state_dict['current_step']
+        self.base_scheduler.load_state_dict(state_dict['base_scheduler'])
+        self.base_lrs = state_dict['base_lrs']
+
+
 class SchedulerFactory:
     """学习率调度器工厂"""
 
@@ -279,6 +331,7 @@ class SchedulerFactory:
         创建学习率调度器
 
         支持多种调度策略: cosine_warmup, cosine, step, plateau
+        支持 warmup_epochs 配置
 
         Args:
             optimizer: 优化器实例
@@ -291,27 +344,36 @@ class SchedulerFactory:
         scheduler_cfg = config['training']['scheduler']
         scheduler_type = scheduler_cfg['type'].lower()
 
+        # 获取 warmup 配置
+        warmup_epochs = scheduler_cfg.get('warmup_epochs', 0)
+        warmup_steps = warmup_epochs * steps_per_epoch
+
+        base_scheduler = None
+
         if scheduler_type == 'cosine_warmup':
             from torch.optim.lr_scheduler import CosineAnnealingWarmRestarts
             T_0 = scheduler_cfg.get('T_0', 10)
             T_mult = scheduler_cfg.get('T_mult', 2)
-            scheduler = CosineAnnealingWarmRestarts(
+            base_scheduler = CosineAnnealingWarmRestarts(
                 optimizer,
                 T_0=T_0 * steps_per_epoch,
                 T_mult=T_mult
             )
         elif scheduler_type == 'cosine':
             from torch.optim.lr_scheduler import CosineAnnealingLR
-            T_max = config['training']['num_epochs'] * steps_per_epoch
-            scheduler = CosineAnnealingLR(optimizer, T_max=T_max)
+            # 如果有 warmup，调整总 epoch 数
+            total_steps = config['training']['num_epochs'] * steps_per_epoch
+            if warmup_epochs > 0:
+                total_steps -= warmup_steps
+            base_scheduler = CosineAnnealingLR(optimizer, T_max=max(1, total_steps))
         elif scheduler_type == 'step':
             from torch.optim.lr_scheduler import StepLR
             step_size = scheduler_cfg.get('step_size', 30)
             gamma = scheduler_cfg.get('gamma', 0.1)
-            scheduler = StepLR(optimizer, step_size=step_size, gamma=gamma)
+            base_scheduler = StepLR(optimizer, step_size=step_size, gamma=gamma)
         elif scheduler_type == 'plateau':
             from torch.optim.lr_scheduler import ReduceLROnPlateau
-            scheduler = ReduceLROnPlateau(
+            base_scheduler = ReduceLROnPlateau(
                 optimizer,
                 mode='max',
                 factor=0.1,
@@ -319,9 +381,15 @@ class SchedulerFactory:
                 verbose=True
             )
         else:
-            scheduler = None
+            base_scheduler = None
 
-        return scheduler
+        # 如果有 warmup 配置且是基础调度器，包装它
+        if warmup_epochs > 0 and base_scheduler is not None:
+            print(f"[Scheduler] Enabled warmup for {warmup_epochs} epochs "
+                  f"({warmup_steps} steps)")
+            return WarmupScheduler(optimizer, warmup_steps, base_scheduler)
+
+        return base_scheduler
 
 
 # =============================================================================
@@ -349,7 +417,7 @@ class LossManager:
 # =============================================================================
 
 class Trainer:
-    """训练器"""
+    """训练器 - 支持混合精度训练 (AMP)"""
 
     def __init__(
         self,
@@ -367,6 +435,31 @@ class Trainer:
         self.writer = writer
         self.train_cfg = train_cfg
         self.loss_manager = LossManager({})
+
+        # 初始化 AMP (Automatic Mixed Precision)
+        self.scaler = None
+        if train_cfg.use_amp and device.type == 'cuda':
+            from torch.cuda.amp import GradScaler
+            self.scaler = GradScaler()
+            print(f"[Trainer] AMP enabled with dtype={train_cfg.amp_dtype}")
+        elif train_cfg.use_amp and device.type != 'cuda':
+            print(f"[Trainer] Warning: AMP requested but device is {device.type}, "
+                  "AMP only works on CUDA. Disabling AMP.")
+
+    def _forward_pass(self, images: torch.Tensor, masks: Optional[torch.Tensor] = None) -> Any:
+        """执行前向传播，支持 AMP autocast"""
+        if self.scaler is not None:
+            from torch.cuda.amp import autocast
+            with autocast(dtype=torch.float16 if self.train_cfg.amp_dtype == 'float16' else torch.bfloat16):
+                if self.model.use_semantic_enhancement and masks is not None:
+                    return self.model(images, masks)
+                else:
+                    return self.model(images)
+        else:
+            if self.model.use_semantic_enhancement and masks is not None:
+                return self.model(images, masks)
+            else:
+                return self.model(images)
 
     def train_epoch(
         self,
@@ -398,17 +491,23 @@ class Trainer:
             images = batch['image'].to(self.device, non_blocking=True)
             masks = batch['mask'].to(self.device, non_blocking=True)
 
-            # 前向传播
-            outputs = self.model(images)
+            # 前向传播 - 支持 AMP
+            outputs = self._forward_pass(images, masks)
 
             # 损失计算（考虑梯度累积）
             loss = self.loss_manager.compute(outputs, masks) / self.train_cfg.accum_steps
 
-            # 反向传播
-            loss.backward()
+            # 反向传播 - 支持 AMP
+            if self.scaler is not None:
+                self.scaler.scale(loss).backward()
+            else:
+                loss.backward()
 
-            # 更新统计
-            actual_loss = loss.item() * self.train_cfg.accum_steps
+            # 更新统计（使用 scaler 时需要在更新前获取原始 loss）
+            if self.scaler is not None:
+                actual_loss = loss.item() * self.train_cfg.accum_steps
+            else:
+                actual_loss = loss.item() * self.train_cfg.accum_steps
             losses.update(actual_loss, images.size(0))
 
             with torch.no_grad():
@@ -435,11 +534,22 @@ class Trainer:
         return losses.avg, metrics.compute()
 
     def _gradient_step(self, batch_idx: int, num_batches: int) -> None:
-        """执行梯度更新步骤"""
+        """执行梯度更新步骤 - 支持 AMP"""
         cfg = self.train_cfg
         if (batch_idx + 1) % cfg.accum_steps == 0 or (batch_idx + 1) == num_batches:
+            # AMP: 先 unscale 再裁剪
+            if self.scaler is not None:
+                self.scaler.unscale_(self.optimizer)
+
             torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=GRADIENT_CLIP_NORM)
-            self.optimizer.step()
+
+            # AMP: 使用 scaler.step 和 scaler.update
+            if self.scaler is not None:
+                self.scaler.step(self.optimizer)
+                self.scaler.update()
+            else:
+                self.optimizer.step()
+
             self.optimizer.zero_grad()
 
             if self.scheduler and isinstance(self.scheduler, (
@@ -450,11 +560,22 @@ class Trainer:
                 self.scheduler.step()
 
     def _finalize_gradient_step(self, num_batches: int) -> None:
-        """确保所有梯度都已更新"""
+        """确保所有梯度都已更新 - 支持 AMP"""
         cfg = self.train_cfg
         if cfg.use_grad_accum and num_batches % cfg.accum_steps != 0:
+            # AMP: 先 unscale 再裁剪
+            if self.scaler is not None:
+                self.scaler.unscale_(self.optimizer)
+
             torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=GRADIENT_CLIP_NORM)
-            self.optimizer.step()
+
+            # AMP: 使用 scaler.step 和 scaler.update
+            if self.scaler is not None:
+                self.scaler.step(self.optimizer)
+                self.scaler.update()
+            else:
+                self.optimizer.step()
+
             self.optimizer.zero_grad()
 
     def _memory_management(self, batch_idx: int) -> None:
@@ -547,7 +668,11 @@ class Validator:
             images = batch['image'].to(self.device, non_blocking=True)
             masks = batch['mask'].to(self.device, non_blocking=True)
 
-            outputs = self.model(images)
+            # 验证时也传入 masks 以支持语义增强模块
+            if self.model.use_semantic_enhancement:
+                outputs = self.model(images, masks)
+            else:
+                outputs = self.model(images)
             loss = self.loss_manager.compute(outputs, masks)
 
             pred = outputs['logits'] if isinstance(outputs, dict) else outputs
@@ -890,9 +1015,12 @@ def main():
                 print(f"Val   - Loss: {val_loss:.4f}, mIoU: {val_metrics['mIoU']:.4f}, "
                       f"Dice: {val_metrics['mDice']:.4f}")
 
-                # ReduceLROnPlateau 调度
-                if isinstance(scheduler, optim.lr_scheduler.ReduceLROnPlateau):
+                # ReduceLROnPlateau 调度（可能被 WarmupScheduler 包装）
+                from torch.optim.lr_scheduler import ReduceLROnPlateau
+                if isinstance(scheduler, ReduceLROnPlateau):
                     scheduler.step(val_metrics['mIoU'])
+                elif hasattr(scheduler, 'base_scheduler') and isinstance(scheduler.base_scheduler, ReduceLROnPlateau):
+                    scheduler.base_scheduler.step(val_metrics['mIoU'])
 
                 # 检查早停和保存最佳模型
                 is_best, should_stop = early_stopping.check(val_metrics['mIoU'])

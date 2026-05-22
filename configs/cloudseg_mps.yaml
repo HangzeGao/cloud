@@ -178,6 +178,7 @@ inference:
 experiment:
   seed: 42
   save_dir: "./experiments_mps"
+  save_interval: 10
   log_interval: 10
   val_interval: 1
   save_best_only: true

@@ -322,18 +322,87 @@ class CloudSenseNet(nn.Module):
     def freeze_encoder(self, freeze_blocks: int = -1):
         """
         冻结编码器的部分或全部层
-        
+
         Args:
-            freeze_blocks: 冻结的block数量，-1表示冻结全部
+            freeze_blocks: 冻结的 block 数量，-1 表示冻结全部
         """
         if freeze_blocks == -1:
             for param in self.encoder.parameters():
                 param.requires_grad = False
             print("[CloudSenseNet] Encoder fully frozen")
-        else:
-            # 根据具体backbone类型冻结
-            # 这里简化处理，实际实现需要针对每个backbone定制
-            print(f"[CloudSenseNet] Freezing first {freeze_blocks} encoder blocks")
+            return
+
+        encoder_type = self.encoder_type.lower()
+        frozen_count = 0
+
+        if encoder_type == 'resnet' or encoder_type == 'resnext':
+            # ResNet/ResNeXt: stem + layer1-4 (共5个部分)
+            # freeze_blocks=0: 只冻结 stem
+            # freeze_blocks=1: 冻结 stem + layer1
+            # ...以此类推
+            layers_to_freeze = ['stem']
+            for i in range(1, min(freeze_blocks + 1, 5)):
+                layers_to_freeze.append(f'layer{i}')
+
+            for name, param in self.encoder.named_parameters():
+                for layer_name in layers_to_freeze:
+                    if name.startswith(layer_name):
+                        param.requires_grad = False
+                        frozen_count += 1
+                        break
+
+        elif encoder_type == 'efficientnet':
+            # EfficientNet: 通过 stage 索引冻结
+            # timm features_only 返回 4 个 stage
+            stages_to_freeze = min(freeze_blocks, 4)
+            for name, param in self.encoder.named_parameters():
+                # 解析 stage 索引，例如 "model.blocks.0" -> stage 0
+                parts = name.split('.')
+                if 'blocks' in parts:
+                    try:
+                        stage_idx = int(parts[parts.index('blocks') + 1])
+                        if stage_idx < stages_to_freeze:
+                            param.requires_grad = False
+                            frozen_count += 1
+                    except (ValueError, IndexError):
+                        pass
+
+        elif encoder_type == 'swin':
+            # Swin: 4 个 stage (layers.0-3)
+            stages_to_freeze = min(freeze_blocks, 4)
+            for name, param in self.encoder.named_parameters():
+                if 'layers' in name:
+                    try:
+                        parts = name.split('.')
+                        layer_idx = parts.index('layers')
+                        stage_idx = int(parts[layer_idx + 1])
+                        if stage_idx < stages_to_freeze:
+                            param.requires_grad = False
+                            frozen_count += 1
+                    except (ValueError, IndexError):
+                        pass
+
+        elif encoder_type == 'convnext':
+            # ConvNeXt: 4 个 stage (stages.0-3)
+            stages_to_freeze = min(freeze_blocks, 4)
+            for name, param in self.encoder.named_parameters():
+                if 'stages' in name:
+                    try:
+                        parts = name.split('.')
+                        stage_idx = int(parts[parts.index('stages') + 1])
+                        if stage_idx < stages_to_freeze:
+                            param.requires_grad = False
+                            frozen_count += 1
+                    except (ValueError, IndexError):
+                        pass
+
+        # 重新统计可训练参数
+        trainable = sum(p.numel() for p in self.parameters() if p.requires_grad)
+        total = sum(p.numel() for p in self.parameters())
+
+        print(f"[CloudSenseNet] Frozen first {freeze_blocks} blocks of {encoder_type}")
+        print(f"[CloudSenseNet] Trainable params: {trainable:,} / {total:,} "
+              f"({100 * trainable / total:.1f}%)")
     
     def print_architecture(self):
         """打印模型架构摘要"""
@@ -359,7 +428,7 @@ class CloudSenseNet(nn.Module):
 MODEL_CONFIGS = {
     # 高精度方案
     'high_accuracy': {
-        'encoder': {'type': 'swin', 'enabled': True, 'swin': {'pretrained': False}},
+        'encoder': {'type': 'swin', 'enabled': True, 'swin': {'pretrained': True}},
         'semantic_enhancement': {'enabled': True},
         'fusion': {'enabled': True, 'type': 'fpn', 'fpn': {'out_channels': 256, 'num_levels': 4}},
         'decoder': {'type': 'unetpp', 'enabled': True},
@@ -368,7 +437,7 @@ MODEL_CONFIGS = {
 
     # 速度优先方案
     'fast': {
-        'encoder': {'type': 'efficientnet', 'enabled': True, 'efficientnet': {'pretrained': False}},
+        'encoder': {'type': 'efficientnet', 'enabled': True, 'efficientnet': {'pretrained': True}},
         'semantic_enhancement': {'enabled': False},
         'fusion': {'enabled': True, 'type': 'aspp', 'aspp': {'out_channels': 256}},
         'decoder': {'type': 'deeplabv3plus', 'enabled': True},
@@ -377,7 +446,7 @@ MODEL_CONFIGS = {
 
     # 平衡方案
     'balanced': {
-        'encoder': {'type': 'convnext', 'enabled': True, 'convnext': {'pretrained': False}},
+        'encoder': {'type': 'convnext', 'enabled': True, 'convnext': {'pretrained': True}},
         'semantic_enhancement': {'enabled': True, 'vocabulary_size': 2, 'patch_size': 16, 'embed_dim': 768, 'merge_stage': 0},
         'fusion': {'enabled': True, 'type': 'bifpn', 'bifpn': {'out_channels': 256, 'num_iterations': 2}},
         'decoder': {'type': 'segformer', 'enabled': True, 'segformer': {'embed_dim': 256}},
@@ -386,7 +455,7 @@ MODEL_CONFIGS = {
 
     # 极简方案
     'minimal': {
-        'encoder': {'type': 'resnet', 'enabled': True, 'resnet': {'pretrained': False}},
+        'encoder': {'type': 'resnet', 'enabled': True, 'resnet': {'pretrained': True}},
         'semantic_enhancement': {'enabled': False},
         'fusion': {'enabled': False},
         'decoder': {'type': 'simple', 'enabled': True},
@@ -398,21 +467,40 @@ MODEL_CONFIGS = {
 def create_model_from_preset(preset: str, num_classes: int = 2) -> CloudSenseNet:
     """
     从预设配置快速创建模型
-    
+
     Args:
         preset: 预设名称 ('high_accuracy', 'fast', 'balanced', 'minimal')
         num_classes: 类别数
-        
+
     Returns:
         model: CloudSenseNet实例
     """
     if preset not in MODEL_CONFIGS:
         raise ValueError(f"Unknown preset: {preset}. Available: {list(MODEL_CONFIGS.keys())}")
-    
+
+    # 获取预设模型配置
+    model_cfg = MODEL_CONFIGS[preset].copy()
+    model_cfg['num_classes'] = num_classes
+
+    # 补充 channel_adaptive 默认配置（预设中未包含时）
+    if 'channel_adaptive' not in model_cfg:
+        model_cfg['channel_adaptive'] = {
+            'enabled': True,
+            'method': 'conv',
+            'use_attention': True,
+            'out_channels': 4
+        }
+
+    # 构建完整的配置结构
     config = {
-        'model': MODEL_CONFIGS[preset],
-        'training': {'loss': {'types': ['dice', 'bce'], 'weights': [0.5, 0.5]}}
+        'model': model_cfg,
+        'training': {
+            'loss': {'types': ['dice', 'bce'], 'weights': [0.5, 0.5]}
+        },
+        'data': {
+            'use_nir': True,
+            'normalize': 'percentile'
+        }
     }
-    config['model']['num_classes'] = num_classes
-    
+
     return CloudSenseNet(config)

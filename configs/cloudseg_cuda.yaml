@@ -132,6 +132,7 @@ inference:
 experiment:
   seed: 42
   save_dir: "./experiments_cuda"
+  save_interval: 10
   log_interval: 10
   val_interval: 1
   save_best_only: false  # CUDA 可保存多个检查点
