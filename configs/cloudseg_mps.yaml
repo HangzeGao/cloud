@@ -10,7 +10,7 @@ model:
   # MPS推荐: conv（轻量）或 physics（可解释性强）
   channel_adaptive:
     enabled: true
-    method: physics     # conv / attention / physics / hybrid / transformer
+    method: hybrid     # conv / attention / physics / hybrid / transformer
     use_attention: true
     out_channels: 4
 
@@ -40,19 +40,19 @@ model:
       num_iterations: 2
 
   # 解码器选择 - UNet++
-  decoder:
-    type: "unetpp"
-    enabled: true
-    unetpp:
-      deep_supervision: false
-      use_cbam: false
+#  decoder:
+#    type: "unetpp"
+#    enabled: true
+#    unetpp:
+#      deep_supervision: false
+#      use_cbam: false
 
   # 解码器选择 - SegFormer 轻量高效
-#  decoder:
-#    type: "segformer"
-#    enabled: true
-#    segformer:
-#      embed_dim: 256
+  decoder:
+    type: "segformer"
+    enabled: true
+    segformer:
+      embed_dim: 256
 
   # 辅助头 - MPS 显存有限，建议禁用
   auxiliary_head:
@@ -66,11 +66,11 @@ training:
   # M2 Pro (16GB): batch_size=8
   # M2 Max (32GB): batch_size=16
   batch_size: 4
-  num_epochs: 15
+  num_epochs: 30
   num_workers: 0
   
   # 早停耐心值 (0 = 禁用早停)
-  patience: 5
+  patience: 10
 
   # 梯度累积
   # 模拟 batch_size=8 的效果，但显存占用保持4
@@ -100,7 +100,7 @@ training:
 
   augmentation:
     enabled: true
-    random_crop_size: [512, 512]
+    random_crop_size: [384, 384]
     horizontal_flip: 0.5
     vertical_flip: 0.5
     brightness: 0.2
@@ -118,9 +118,10 @@ data:
   
   # MPS 建议从少量数据集开始
   datasets:
-    - name: "hrcwhu"
+#    - name: "hrcwhu"
     - name: "rice2"
     - name: "oncloudn"
+    - name: "cloud38"
   
   # use_nir: 是否使用 NIR 通道 (true=4通道 RGB+NIR, false=3通道 RGB)
   use_nir: true
@@ -157,8 +158,8 @@ data:
   
   val_test_split:
     enabled: true
-    train_ratio: 0.75
-    val_ratio: 0.25
+    train_ratio: 0.7
+    val_ratio: 0.3
     test_ratio: 0.0
     seed: 42
     stratify: true
@@ -172,7 +173,7 @@ inference:
   
   # 推理归一化设置（优先级高于data.inference_normalization）
   # auto_recommend: 自动分析图像特征并推荐最佳归一化方法
-  auto_recommend: false
+  auto_recommend: true
 
 # ==================== 实验配置 ====================
 experiment:

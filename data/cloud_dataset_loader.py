@@ -498,67 +498,75 @@ class UnifiedCloudDataset(Dataset):
 class CloudAugmentation:
     """
     云分割数据增强
-    
+
     支持随机裁剪、翻转、亮度/对比度调整、高斯噪声等
     支持 3通道 (RGB) 或 4通道 (RGB+NIR) 输入
-    """
     
-    def __init__(self, config: dict):
+    Args:
+        config: 配置字典
+        mode: 'train' 或 'val' - train使用完整增强，val只使用裁剪
+    """
+
+    def __init__(self, config: dict, mode: str = 'train'):
         self.config = config
         self.enabled = config.get('enabled', False)
         self.use_nir = config.get('use_nir', True)
-        
+        self.mode = mode
+
         if self.enabled:
-            print(f"[CloudAugmentation] Enabled with use_nir={self.use_nir}")
+            print(f"[CloudAugmentation] Enabled (mode={self.mode}, use_nir={self.use_nir})")
     
-    def __call__(self, image, mask, mode='train'):
+    def __call__(self, image, mask, mode=None):
         """
         应用数据增强
-        
+
         Args:
             image: numpy.ndarray [C, H, W] 或 torch.Tensor [C, H, W]
             mask: numpy.ndarray [H, W] 或 torch.Tensor [H, W]
-            mode: 'train' or 'val'
-            
+            mode: 'train' or 'val' (已弃用，使用 self.mode)
+
         Returns:
             image: torch.Tensor [C, H, W]
             mask: torch.Tensor [H, W]
         """
         import torch
         import torchvision.transforms.functional as TF
-        
+
         # 统一转换为 torch.Tensor
         if isinstance(image, np.ndarray):
             image = torch.from_numpy(image).float()
         if isinstance(mask, np.ndarray):
             mask = torch.from_numpy(mask).long()
-        
+
         # 根据 use_nir 调整通道数
         if not self.use_nir and image.shape[0] == 4:
             image = image[:3]  # 只保留RGB
-        
-        if not self.enabled or mode != 'train':
+
+        if not self.enabled:
             return image, mask
-        
-        # 训练模式的数据增强
-        # 1. 随机裁剪
+
+        # 1. 随机裁剪（train和val都执行，用于统一尺寸）
         crop_size = self.config.get('random_crop_size', None)
         if crop_size is not None:
             i, j, h, w = T.RandomCrop.get_params(image, output_size=crop_size)
             image = TF.crop(image, i, j, h, w)
             mask = TF.crop(mask.unsqueeze(0), i, j, h, w).squeeze(0)
-        
-        # 2. 随机水平翻转
+
+        # val模式：只裁剪，不执行其他增强
+        if self.mode != 'train':
+            return image, mask
+
+        # 2. 随机水平翻转（仅train）
         if torch.rand(1) < self.config.get('horizontal_flip', 0.5):
             image = TF.hflip(image)
             mask = TF.hflip(mask.unsqueeze(0)).squeeze(0)
-        
-        # 3. 随机垂直翻转
+
+        # 3. 随机垂直翻转（仅train）
         if torch.rand(1) < self.config.get('vertical_flip', 0.5):
             image = TF.vflip(image)
             mask = TF.vflip(mask.unsqueeze(0)).squeeze(0)
-        
-        # 4. 亮度调整 (只应用于RGB通道)
+
+        # 4. 亮度调整 (只应用于RGB通道，仅train)
         brightness = self.config.get('brightness', 0)
         if brightness > 0:
             brightness_factor = torch.empty(1).uniform_(1 - brightness, 1 + brightness).item()
@@ -569,8 +577,8 @@ class CloudAugmentation:
                 image = torch.cat([rgb, nir], dim=0)
             else:
                 image = TF.adjust_brightness(image, brightness_factor)
-        
-        # 5. 对比度调整 (只应用于RGB通道)
+
+        # 5. 对比度调整 (只应用于RGB通道，仅train)
         contrast = self.config.get('contrast', 0)
         if contrast > 0:
             contrast_factor = torch.empty(1).uniform_(1 - contrast, 1 + contrast).item()
@@ -581,8 +589,8 @@ class CloudAugmentation:
                 image = torch.cat([rgb, nir], dim=0)
             else:
                 image = TF.adjust_contrast(image, contrast_factor)
-        
-        # 6. 高斯噪声
+
+        # 6. 高斯噪声（仅train）
         noise_std = self.config.get('gaussian_noise', 0)
         if noise_std > 0:
             noise = torch.randn_like(image) * noise_std
@@ -651,7 +659,10 @@ def create_mixed_dataloaders(config: dict, dev_run: bool = False):
     # 数据增强
     aug_config = train_cfg.get('augmentation', {'enabled': False})
     aug_config['use_nir'] = use_nir
-    transform = CloudAugmentation(aug_config)
+    train_transform = CloudAugmentation(aug_config, mode='train')
+    
+    # 验证集只使用裁剪（统一尺寸，无其他增强）
+    val_transform = CloudAugmentation(aug_config, mode='val')
     
     # 获取数据集配置
     datasets = data_cfg.get('datasets', [])
@@ -687,33 +698,33 @@ def create_mixed_dataloaders(config: dict, dev_run: bool = False):
         split='train',
         bands=bands,
         datasets=dataset_names if dataset_names else None,
-        transform=transform,
+        transform=train_transform,
         normalize=normalize,
         train_ratio=train_ratio,
         val_ratio=val_ratio,
         test_ratio=test_ratio,
         random_seed=seed,
     )
-    
+
     val_dataset = UnifiedCloudDataset(
         data_dir=unified_data_dir,
         split='val',
         bands=bands,
         datasets=dataset_names if dataset_names else None,
-        transform=None,  # 验证集不使用数据增强
+        transform=val_transform,  # 验证集只使用裁剪对齐尺寸
         normalize=normalize,
         train_ratio=train_ratio,
         val_ratio=val_ratio,
         test_ratio=test_ratio,
         random_seed=seed,
     )
-    
+
     test_dataset = UnifiedCloudDataset(
         data_dir=unified_data_dir,
         split='test',
         bands=bands,
         datasets=dataset_names if dataset_names else None,
-        transform=None,
+        transform=val_transform,  # 测试集同样只裁剪
         normalize=normalize,
         train_ratio=train_ratio,
         val_ratio=val_ratio,
@@ -721,17 +732,18 @@ def create_mixed_dataloaders(config: dict, dev_run: bool = False):
         random_seed=seed,
     )
     
-    # Dev run: 限制数据集大小
+    # Dev run: 限制数据集大小 (至少保证1个完整的batch用于训练和验证)
     if dev_run:
-        train_samples = min(int(len(train_dataset) * 0.01), len(train_dataset))
-        val_samples = min(int(len(val_dataset) * 0.01), len(val_dataset))
-        test_samples = min(int(len(test_dataset) * 0.01), len(test_dataset))
-        
-        train_dataset = Subset(train_dataset, range(train_samples))
-        val_dataset = Subset(val_dataset, range(val_samples))
-        test_dataset = Subset(test_dataset, range(test_samples))
-        
-        print(f"[Dev Run] Limited: train={train_samples}, val={val_samples}, test={test_samples}")
+        batch_size = train_cfg.get('batch_size', 8)
+        train_samples = max(batch_size * 2, min(int(len(train_dataset) * 0.01), len(train_dataset)))
+        val_samples = max(4, min(int(len(val_dataset) * 0.01), len(val_dataset)))
+        test_samples = max(4, min(int(len(test_dataset) * 0.01), len(test_dataset)))
+
+        train_dataset = Subset(train_dataset, range(min(train_samples, len(train_dataset))))
+        val_dataset = Subset(val_dataset, range(min(val_samples, len(val_dataset))))
+        test_dataset = Subset(test_dataset, range(min(test_samples, len(test_dataset))))
+
+        print(f"[Dev Run] Limited: train={len(train_dataset)}, val={len(val_dataset)}, test={len(test_dataset)}")
     
     print(f"[MixedDataLoader] Loaded: train={len(train_dataset)}, val={len(val_dataset)}, test={len(test_dataset)}")
     
