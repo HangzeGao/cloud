@@ -21,8 +21,9 @@ class BitDepthEstimator(nn.Module):
     """
     轻量级位深度估计器
     通过分析输入图像的统计特征估计位深度
+    支持 8-bit 到 16-bit 范围 (覆盖常见卫星图像: 8-bit RGB, 10-bit GF1, 12-bit Sentinel-2, 16-bit 高比特图像)
     """
-    def __init__(self, in_channels: int = 4, hidden_dim: int = 64):
+    def __init__(self, in_channels: int = 4, hidden_dim: int = 64, num_bit_depths: int = 9):
         super().__init__()
         # 使用全局统计特征而非空间特征
         self.feature_extractor = nn.Sequential(
@@ -35,16 +36,18 @@ class BitDepthEstimator(nn.Module):
             nn.AdaptiveAvgPool2d(1),
         )
 
-        # 位深度分类器: 8-bit, 10-bit, 12-bit, 16-bit, 32-bit
+        # 位深度分类器: 8, 9, 10, 11, 12, 13, 14, 15, 16-bit
+        self.num_classes = num_bit_depths
         self.classifier = nn.Sequential(
             nn.Flatten(),
             nn.Linear(hidden_dim, hidden_dim // 2),
             nn.ReLU(inplace=True),
             nn.Dropout(0.3),
-            nn.Linear(hidden_dim // 2, 5),  # 5 classes for bit depths
+            nn.Linear(hidden_dim // 2, num_bit_depths),  # 9 classes for 8-16 bit depths
         )
 
-        self.bit_depths = torch.tensor([8, 10, 12, 16, 32])
+        # 位深度值: 8, 9, 10, 11, 12, 13, 14, 15, 16
+        self.bit_depths = torch.tensor([8, 9, 10, 11, 12, 13, 14, 15, 16])
 
     def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         """
@@ -67,8 +70,9 @@ class BitDepthAdaptiveLayer(nn.Module):
     """
     位深度自适应层
     根据输入位深度动态调整特征提取
+    支持 8-bit 到 16-bit (9个类别)
     """
-    def __init__(self, in_channels: int, out_channels: int, num_bit_depths: int = 5):
+    def __init__(self, in_channels: int, out_channels: int, num_bit_depths: int = 9):
         super().__init__()
         self.in_channels = in_channels
         self.out_channels = out_channels
@@ -137,8 +141,11 @@ class AdaptiveInputNorm(nn.Module):
     """
     自适应输入归一化层
     根据估计的位深度动态调整归一化参数
+    支持 8-bit 到 16-bit (9个类别)
     """
-    def __init__(self, num_channels: int = 4, bit_depths: List[int] = [8, 10, 12, 16, 32]):
+    def __init__(self, num_channels: int = 4, bit_depths: List[int] = None):
+        if bit_depths is None:
+            bit_depths = list(range(8, 17))  # [8, 9, 10, 11, 12, 13, 14, 15, 16]
         super().__init__()
         self.num_channels = num_channels
         self.bit_depths = bit_depths
@@ -206,8 +213,9 @@ class AdaptiveInputNorm(nn.Module):
 class AdaptiveEncoder(nn.Module):
     """
     自适应编码器 - 包装现有的smp编码器，添加位深度自适应能力
+    支持 8-bit 到 16-bit (9个类别)
     """
-    def __init__(self, base_encoder: nn.Module, in_channels: int = 4, num_bit_depths: int = 5):
+    def __init__(self, base_encoder: nn.Module, in_channels: int = 4, num_bit_depths: int = 9):
         super().__init__()
         self.base_encoder = base_encoder
         self.in_channels = in_channels
@@ -337,21 +345,26 @@ class CloudModel(pl.LightningModule):
         bit_depth_loss = 0
         if torch.rand(1).item() < 0.5:
             # 混合位深度训练：随机模拟不同位深度
-            # 随机选择目标位深度: 8, 9, 10, 11
-            low_bd, high_bd = 8, 12
+            # 随机选择目标位深度: 8, 9, 10, 11, 12
+            low_bd, high_bd = 8, 13
             target_bd = torch.randint(low_bd, high_bd, (1,)).item()
             x = self._simulate_bit_depth(x, target_bd)
             if hasattr(self.model.encoder, 'bit_depth_estimator'):
-                _, estimated_bd = self.model.encoder.bit_depth_estimator(x)
-                target_bd_class = torch.tensor([target_bd - 8], device=x.device).float()
-                bit_depth_loss = F.mse_loss(estimated_bd, target_bd_class)
+                bit_depth_logits, estimated_bd = self.model.encoder.bit_depth_estimator(x)
+                # 简化映射：8-bit -> class 0, 9-bit -> class 1, ..., 16-bit -> class 8
+                target_class = target_bd - 8  # 直接映射到 0-8
+                target_class = max(0, min(target_class, 8))  # 确保在有效范围内
+
+                target_class_tensor = torch.tensor([target_class] * x.size(0), device=x.device).long()
+                bit_depth_loss = F.cross_entropy(bit_depth_logits, target_class_tensor)
         preds = self.forward(x)
         ce_loss = torch.nn.CrossEntropyLoss(weight=torch.tensor([0.1, 0.4, 0.5], device=self.device_type), reduction="mean")(preds, y)
         dice_loss = smp.losses.DiceLoss(mode="multiclass", from_logits=True)(preds, y)
-        loss = 0.5 * ce_loss + 0.5 * dice_loss + 0.1 * bit_depth_loss
-        self.log(
-            "loss", loss, on_step=True, on_epoch=True, prog_bar=True, logger=True,
-        )
+        loss = 0.5 * ce_loss + 0.5 * dice_loss + 0.001 * bit_depth_loss
+        self.log(name="ce_loss", value=ce_loss, on_step=True, on_epoch=True, prog_bar=True, logger=True,)
+        self.log(name="dice_loss", value=dice_loss, on_step=True, on_epoch=True, prog_bar=True, logger=True,)
+        self.log(name="bit_depth_loss", value=bit_depth_loss, on_step=True, on_epoch=True, prog_bar=True, logger=True,)
+        self.log(name="loss", value=loss, on_step=True, on_epoch=True, prog_bar=True, logger=True,)
         return loss
 
     def validation_step(self, batch: dict, batch_idx: int):
