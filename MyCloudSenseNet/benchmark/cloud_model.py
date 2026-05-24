@@ -174,11 +174,11 @@ class CloudModel(pl.LightningModule):
         ]
         
         if self.enable_bit_depth_adaptation:
-            if hasattr(self.model.encoder, 'bit_depth_estimator'):
-                estimator_params = list(self.model.encoder.bit_depth_estimator.parameters())
-                if len(estimator_params) > 0:
+            if hasattr(self.model.encoder, 'bit_depth_estimator') and self.model.encoder.bit_depth_estimator is not None:
+                bit_depth_estimator_params = list(self.model.encoder.bit_depth_estimator.parameters())
+                if len(bit_depth_estimator_params) > 0:
                     param_groups.append({
-                        "params": estimator_params,
+                        "params": bit_depth_estimator_params,
                         "lr": self.learning_rate * 2.0,
                         "name": "bit_depth_estimator"
                     })
