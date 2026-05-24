@@ -13,11 +13,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from .bit_depth_estimators import (
-    MinimalBitDepthEstimator,
-    ConvBitDepthEstimator,
-    StatisticalBitDepthEstimator,
-)
+from .bit_depth_estimators import create_bit_depth_estimator
 from .feature_adapters import create_feature_adapter
 
 
@@ -41,22 +37,12 @@ class BitDepthAdaptiveEncoder(nn.Module):
         self.base_encoder = base_encoder
         self.estimator_type = estimator_type
         self.adapter_type = adapter_type
-        
-        # 初始化位深度估计器（8-13范围，6个类别）
-        if estimator_type == 'statistical':
-            self.bit_depth_estimator = StatisticalBitDepthEstimator(
-                in_channels=in_channels, hidden_dim=32, num_bit_depths=6
-            )
-        elif estimator_type == 'conv':
-            self.bit_depth_estimator = ConvBitDepthEstimator(
-                in_channels=in_channels, num_bit_depths=6
-            )
-        elif estimator_type == 'minimal':
-            self.bit_depth_estimator = MinimalBitDepthEstimator(
-                in_channels=in_channels, num_bit_depths=6
-            )
-        else:
-            raise ValueError(f"Unknown estimator_type: {estimator_type}")
+
+        # 初始化位深度估计器
+        self.bit_depth_estimator = create_bit_depth_estimator(
+            estimator_type=estimator_type,
+            in_channels=in_channels,
+        )
         
         # 自动检测特征维度
         if feature_dim is None:
@@ -141,25 +127,14 @@ class SimpleBitDepthAdaptiveEncoder(nn.Module):
         super().__init__()
         self.base_encoder = base_encoder
         self.estimator_type = estimator_type
-        
-        # 初始化位深度估计器（8-13范围，6个类别）
-        if estimator_type == 'statistical':
-            self.bit_depth_estimator = StatisticalBitDepthEstimator(
-                in_channels=in_channels, hidden_dim=32, num_bit_depths=6
-            )
-        elif estimator_type == 'conv':
-            self.bit_depth_estimator = ConvBitDepthEstimator(
-                in_channels=in_channels, num_bit_depths=6
-            )
-        elif estimator_type == 'minimal':
-            self.bit_depth_estimator = MinimalBitDepthEstimator(
-                in_channels=in_channels, num_bit_depths=6
-            )
-        else:
-            raise ValueError(f"Unknown estimator_type: {estimator_type}")
-        
+
+        # 初始化位深度估计器
+        self.bit_depth_estimator = create_bit_depth_estimator(
+            estimator_type=estimator_type,
+            in_channels=in_channels,
+        )
         self.feature_adapter = None
-        
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
         前向传播：估计位深度（仅监控），然后通过编码器
@@ -186,3 +161,75 @@ class SimpleBitDepthAdaptiveEncoder(nn.Module):
                 'probs': F.softmax(self._last_bit_depth_logits, dim=1),
             }
         return None
+
+
+# 预定义配置
+ENCODER_CONFIGS = {
+    'full': {
+        'class': BitDepthAdaptiveEncoder,
+        'description': '完整版，支持位深度估计和特征适配',
+        'features': 'estimate + adapt',
+    },
+    'simple': {
+        'class': SimpleBitDepthAdaptiveEncoder,
+        'description': '简化版，只做位深度估计（监控用）',
+        'features': 'estimate only',
+    },
+}
+
+
+def create_bit_depth_adaptive_encoder(
+    encoder_type: str,
+    base_encoder: nn.Module,
+    in_channels: int = 4,
+    feature_dim: int = None,
+    estimator_type: str = 'conv',
+    adapter_type: str = 'ultra_light',
+):
+    """
+    工厂函数：创建指定位深度自适应编码器
+    
+    Args:
+        encoder_type: 'full' 或 'simple'
+        base_encoder: 基础编码器（如ResNet、EfficientNet等）
+        in_channels: 输入通道数
+        feature_dim: 特征维度（None则自动检测）
+        estimator_type: 估计器类型 ('minimal', 'conv', 'statistical')
+        adapter_type: 适配器类型 ('none', 'ultra_light', 'light', 'conditional', 'original')
+                      仅当 encoder_type='full' 时有效
+    
+    Returns:
+        BitDepthAdaptiveEncoder 实例
+    
+    Example:
+        >>> encoder = create_bit_depth_adaptive_encoder(
+        ...     'full',
+        ...     base_encoder=resnet50,
+        ...     estimator_type='conv',
+        ...     adapter_type='ultra_light'
+        ... )
+    """
+    if encoder_type not in ENCODER_CONFIGS:
+        raise ValueError(
+            f"Unknown encoder_type: {encoder_type}. "
+            f"Choose from {list(ENCODER_CONFIGS.keys())}"
+        )
+    
+    encoder_class = ENCODER_CONFIGS[encoder_type]['class']
+    
+    if encoder_type == 'simple':
+        # 简化版不支持 adapter_type
+        return encoder_class(
+            base_encoder=base_encoder,
+            in_channels=in_channels,
+            estimator_type=estimator_type,
+        )
+    else:
+        # 完整版支持所有参数
+        return encoder_class(
+            base_encoder=base_encoder,
+            in_channels=in_channels,
+            feature_dim=feature_dim,
+            estimator_type=estimator_type,
+            adapter_type=adapter_type,
+        )

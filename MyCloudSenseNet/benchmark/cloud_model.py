@@ -5,15 +5,10 @@ import pandas as pd
 import pytorch_lightning as pl
 import segmentation_models_pytorch as smp
 import torch
-import torch.nn as nn
-import torch.nn.functional as F
 
 from MyCloudSenseNet.benchmark.cloud_dataset import CloudDataset
 from MyCloudSenseNet.benchmark.losses import intersection_over_union
-from MyCloudSenseNet.benchmark.adaptive_encoders import (
-    BitDepthAdaptiveEncoder,
-    SimpleBitDepthAdaptiveEncoder,
-)
+from MyCloudSenseNet.benchmark.adaptive_encoders import create_bit_depth_adaptive_encoder
 
 
 def get_device():
@@ -39,7 +34,7 @@ class CloudModel(pl.LightningModule):
         hparams: dict = {},
         model_name: str = "unet",
         enable_bit_depth_adaptation: bool = True,
-        use_simple_adapter: bool = False,
+        encoder_type: str = 'full',
         estimator_type: str = 'conv',
         adapter_type: str = 'ultra_light',
     ):
@@ -50,8 +45,9 @@ class CloudModel(pl.LightningModule):
         self.bands = bands
         self.in_channels = len(bands)
         self.num_classes = 3
+
         self.enable_bit_depth_adaptation = enable_bit_depth_adaptation
-        self.use_simple_adapter = use_simple_adapter
+        self.encoder_type = encoder_type
         self.estimator_type = estimator_type
         self.adapter_type = adapter_type
 
@@ -232,29 +228,20 @@ class CloudModel(pl.LightningModule):
             raise ValueError(f"Unknown model name: {model_name}")
 
         if self.enable_bit_depth_adaptation:
-            if self.use_simple_adapter:
-                adaptive_encoder = SimpleBitDepthAdaptiveEncoder(
-                    model.encoder,
-                    in_channels=self.in_channels,
-                    estimator_type=self.estimator_type,
-                )
-            else:
-                feature_dim = None
-                if hasattr(model.encoder, 'out_channels'):
-                    out_ch = model.encoder.out_channels
-                    if isinstance(out_ch, (list, tuple)):
-                        feature_dim = out_ch[-1]
-                    else:
-                        feature_dim = out_ch
-
-                adaptive_encoder = BitDepthAdaptiveEncoder(
-                    model.encoder,
-                    in_channels=self.in_channels,
-                    feature_dim=feature_dim,
-                    estimator_type=self.estimator_type,
-                    adapter_type=self.adapter_type,
-                )
-            
+            feature_dim = None
+            if hasattr(model.encoder, 'out_channels'):
+                out_ch = model.encoder.out_channels
+                if isinstance(out_ch, (list, tuple)):
+                    feature_dim = out_ch[-1]
+                else:
+                    feature_dim = out_ch
+            adaptive_encoder = create_bit_depth_adaptive_encoder(
+                encoder_type=self.encoder_type,
+                in_channels=self.in_channels,
+                feature_dim=feature_dim,
+                estimator_type=self.estimator_type,
+                adapter_type=self.adapter_type,
+            )
             model.encoder = adaptive_encoder
 
         if self.gpu:

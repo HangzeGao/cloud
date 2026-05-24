@@ -167,3 +167,56 @@ class StatisticalBitDepthEstimator(nn.Module):
         estimated_bit_depth = (probs * bit_depths).sum(dim=1)
         
         return logits, estimated_bit_depth
+
+
+# 预定义配置
+ESTIMATOR_CONFIGS = {
+    'minimal': {
+        'class': MinimalBitDepthEstimator,
+        'description': '极简版，无训练开销，仅用于监控',
+        'speed': '⚡⚡⚡ 最快',
+        'trainable': False,
+    },
+    'conv': {
+        'class': ConvBitDepthEstimator,
+        'description': '轻量卷积，平衡速度与精度',
+        'speed': '⚡⚡ 快',
+        'trainable': True,
+    },
+    'statistical': {
+        'class': StatisticalBitDepthEstimator,
+        'description': '统计特征MLP，精度最高但较慢',
+        'speed': '⚡ 中等',
+        'trainable': True,
+    },
+}
+
+
+def create_bit_depth_estimator(
+    estimator_type: str,
+    in_channels: int = 4,
+    num_bit_depths: int = 6,
+):
+    """
+    工厂函数：创建指定位深度估计器
+    
+    Args:
+        estimator_type: 'minimal', 'conv', 'statistical'
+        in_channels: 输入通道数
+        num_bit_depths: 位深度类别数（默认6，对应8-13）
+    
+    Returns:
+        BitDepthEstimator 实例
+    
+    Example:
+        >>> estimator = create_bit_depth_estimator('conv', in_channels=4)
+        >>> logits, estimated = estimator(x)
+    """
+    if estimator_type not in ESTIMATOR_CONFIGS:
+        raise ValueError(
+            f"Unknown estimator_type: {estimator_type}. "
+            f"Choose from {list(ESTIMATOR_CONFIGS.keys())}"
+        )
+    
+    estimator_class = ESTIMATOR_CONFIGS[estimator_type]['class']
+    return estimator_class(in_channels, num_bit_depths)
