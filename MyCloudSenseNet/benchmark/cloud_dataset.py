@@ -1,9 +1,11 @@
 from typing import Optional, List
 
+import albumentations as A
 import numpy as np
 import pandas as pd
 import rasterio
 import torch
+from torch._C import AnyType
 
 
 def normalize_by_minmax(data, max_pixel=1):
@@ -72,7 +74,8 @@ class CloudDataset(torch.utils.data.Dataset):
         bands: List[str],
         y_paths: Optional[pd.DataFrame] = None,
         bit_depth: Optional[int] = 10,
-        transforms: Optional[list] = None,
+        transforms: Optional[A.Compose] = None,
+        additional_transforms: Optional[A.Compose] = None,
     ):
         """
         Instantiate the CloudDataset class.
@@ -82,6 +85,7 @@ class CloudDataset(torch.utils.data.Dataset):
         self.label = y_paths
         self.bit_depth = bit_depth
         self.transforms = transforms
+        self.additional_transforms = additional_transforms
 
     def __len__(self):
         return len(self.data)
@@ -101,6 +105,8 @@ class CloudDataset(torch.utils.data.Dataset):
         # Apply data augmentations, if provided
         if self.transforms:
             x_arr = self.transforms(image=x_arr)["image"]
+        if self.additional_transforms:
+            x_arr = self.additional_transforms(image=x_arr)["image"]
         x_arr = np.transpose(x_arr, [2, 0, 1])
 
         # Prepare dictionary for item

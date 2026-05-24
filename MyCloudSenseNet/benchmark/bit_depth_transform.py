@@ -77,7 +77,7 @@ class BitDepthSimulation(ImageOnlyTransform):
     
     def __init__(
         self,
-        bit_depth_range: tuple = (8, 11),
+        bit_depth_range: tuple = (8, 12),
         input_max_value: float = 1.0,
         add_noise: bool = True,
         noise_factor: float = 0.5,
