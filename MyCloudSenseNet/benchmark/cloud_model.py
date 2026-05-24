@@ -8,7 +8,7 @@ import torch
 
 from MyCloudSenseNet.benchmark.cloud_dataset import CloudDataset
 from MyCloudSenseNet.benchmark.losses import intersection_over_union
-from MyCloudSenseNet.benchmark.adaptive_encoders import create_bit_depth_adaptive_encoder
+from MyCloudSenseNet.benchmark.adaptive_encoders import create_adaptive_encoder
 
 
 def get_device():
@@ -34,7 +34,7 @@ class CloudModel(pl.LightningModule):
         hparams: dict = {},
         model_name: str = "unet",
         enable_bit_depth_adaptation: bool = True,
-        encoder_type: str = 'full',
+        encoder_type: str = 'bit_depth',
         estimator_type: str = 'conv',
         adapter_type: str = 'ultra_light',
     ):
@@ -235,7 +235,7 @@ class CloudModel(pl.LightningModule):
                     feature_dim = out_ch[-1]
                 else:
                     feature_dim = out_ch
-            adaptive_encoder = create_bit_depth_adaptive_encoder(
+            adaptive_encoder = create_adaptive_encoder(
                 encoder_type=self.encoder_type,
                 base_encoder=model.encoder,
                 in_channels=self.in_channels,

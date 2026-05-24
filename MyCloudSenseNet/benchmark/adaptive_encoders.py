@@ -111,74 +111,17 @@ class BitDepthAdaptiveEncoder(nn.Module):
         return None
 
 
-class SimpleBitDepthAdaptiveEncoder(nn.Module):
-    """
-    简化版自适应编码器：只保留位深度估计器，不做特征适配
-    
-    用于快速验证和监控场景，零额外计算开销
-    """
-    
-    def __init__(
-        self, 
-        base_encoder: nn.Module, 
-        in_channels: int = 4,
-        estimator_type: str = 'minimal',
-    ):
-        super().__init__()
-        self.base_encoder = base_encoder
-        self.estimator_type = estimator_type
-
-        # 初始化位深度估计器
-        self.bit_depth_estimator = create_bit_depth_estimator(
-            estimator_type=estimator_type,
-            in_channels=in_channels,
-        )
-        self.feature_adapter = None
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """
-        前向传播：估计位深度（仅监控），然后通过编码器
-        
-        Args:
-            x: 输入图像 [B, C, H, W]
-        
-        Returns:
-            编码特征（不做适配）
-        """
-        with torch.no_grad():
-            bit_depth_logits, estimated_bd = self.bit_depth_estimator(x)
-            self._last_bit_depth_logits = bit_depth_logits
-            self._last_estimated_bd = estimated_bd
-        
-        return self.base_encoder(x)
-    
-    def get_bit_depth_info(self) -> Optional[Dict[str, torch.Tensor]]:
-        """获取最近一次前向传播的位深度信息"""
-        if hasattr(self, '_last_bit_depth_logits'):
-            return {
-                'logits': self._last_bit_depth_logits,
-                'estimated': self._last_estimated_bd,
-                'probs': F.softmax(self._last_bit_depth_logits, dim=1),
-            }
-        return None
-
-
 # 预定义配置
 ENCODER_CONFIGS = {
-    'full': {
+    'bit_depth': {
         'class': BitDepthAdaptiveEncoder,
         'description': '完整版，支持位深度估计和特征适配',
         'features': 'estimate + adapt',
     },
-    'simple': {
-        'class': SimpleBitDepthAdaptiveEncoder,
-        'description': '简化版，只做位深度估计（监控用）',
-        'features': 'estimate only',
-    },
 }
 
 
-def create_bit_depth_adaptive_encoder(
+def create_adaptive_encoder(
     encoder_type: str,
     base_encoder: nn.Module,
     in_channels: int = 4,
@@ -193,20 +136,11 @@ def create_bit_depth_adaptive_encoder(
         )
     
     encoder_class = ENCODER_CONFIGS[encoder_type]['class']
-    
-    if encoder_type == 'simple':
-        # 简化版不支持 adapter_type
-        return encoder_class(
-            base_encoder=base_encoder,
-            in_channels=in_channels,
-            estimator_type=estimator_type,
-        )
-    else:
-        # 完整版支持所有参数
-        return encoder_class(
-            base_encoder=base_encoder,
-            in_channels=in_channels,
-            feature_dim=feature_dim,
-            estimator_type=estimator_type,
-            adapter_type=adapter_type,
-        )
+
+    return encoder_class(
+        base_encoder=base_encoder,
+        in_channels=in_channels,
+        feature_dim=feature_dim,
+        estimator_type=estimator_type,
+        adapter_type=adapter_type,
+    )
