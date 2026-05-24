@@ -20,12 +20,11 @@ ENV/
 *.swo
 
 # Model checkpoints and logs
-benchmark/unet/
-benchmark/segformer/
 experiments/
 experiments_*/
 checkpoints/
 lightning_logs/
+*.pt
 *.pth
 *.ckpt
 
