@@ -5,7 +5,6 @@ import numpy as np
 import pandas as pd
 import rasterio
 import torch
-from torch._C import AnyType
 
 
 def normalize_by_minmax(data, max_pixel=1):

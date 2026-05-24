@@ -301,8 +301,8 @@ class CloudModel(pl.LightningModule):
         self.batch_size = self.hparams.get("batch_size", 4)
         self.device_type = get_device()
         self.gpu = self.device_type in ("mps", "cuda")
-        self.transform = None # self._create_transforms()
-        self.additional_transform = self._create_additional_transforms()
+        self.transforms = None # self._create_transforms()
+        self.additional_transforms = self._create_additional_transforms()
 
         # Instantiate datasets, model, and trainer params if provided
         self._init_datasets(x_train, y_train, x_val, y_val)
@@ -314,8 +314,8 @@ class CloudModel(pl.LightningModule):
                 x_paths=x_train,
                 bands=self.bands,
                 y_paths=y_train,
-                transforms=self.transform,
-                additional_transforms=self.additional_transform,
+                transforms=self.transforms,
+                additional_transforms=self.additional_transforms,
             )
 
         if x_val is not None and y_val is not None:
@@ -345,28 +345,12 @@ class CloudModel(pl.LightningModule):
         torch.set_grad_enabled(True)
         x = self._to_device(batch["chip"])
         y = self._to_device(batch["label"].long())
-        # bit_depth_loss = 0
-        # if torch.rand(1).item() < 0.5:
-        #     # 混合位深度训练：随机模拟不同位深度
-        #     # 随机选择目标位深度: 8, 9, 10, 11, 12
-        #     low_bd, high_bd = 8, 13
-        #     target_bd = torch.randint(low_bd, high_bd, (1,)).item()
-        #     x = self._simulate_bit_depth(x, target_bd)
-        #     if hasattr(self.model.encoder, 'bit_depth_estimator'):
-        #         bit_depth_logits, estimated_bd = self.model.encoder.bit_depth_estimator(x)
-        #         # 简化映射：8-bit -> class 0, 9-bit -> class 1, ..., 16-bit -> class 8
-        #         target_class = target_bd - 8  # 直接映射到 0-8
-        #         target_class = max(0, min(target_class, 8))  # 确保在有效范围内
-        #
-        #         target_class_tensor = torch.tensor([target_class] * x.size(0), device=x.device).long()
-        #         bit_depth_loss = F.cross_entropy(bit_depth_logits, target_class_tensor)
         preds = self.forward(x)
         ce_loss = torch.nn.CrossEntropyLoss(weight=torch.tensor([0.1, 0.4, 0.5], device=self.device_type), reduction="mean")(preds, y)
         dice_loss = smp.losses.DiceLoss(mode="multiclass", from_logits=True)(preds, y)
-        loss = 0.5 * ce_loss + 0.5 * dice_loss# + 0.001 * bit_depth_loss
+        loss = 0.5 * ce_loss + 0.5 * dice_loss
         self.log(name="ce_loss", value=ce_loss, on_step=True, on_epoch=True, prog_bar=True, logger=True,)
         self.log(name="dice_loss", value=dice_loss, on_step=True, on_epoch=True, prog_bar=True, logger=True,)
-        # self.log(name="bit_depth_loss", value=bit_depth_loss, on_step=True, on_epoch=True, prog_bar=True, logger=True,)
         self.log(name="loss", value=loss, on_step=True, on_epoch=True, prog_bar=True, logger=True,)
         return loss
 
@@ -482,7 +466,7 @@ class CloudModel(pl.LightningModule):
         return A.Compose(transforms)
 
     def _create_additional_transforms(self):
-        from benchmark.bit_depth_transform import BitDepthSimulation
+        from MyCloudSenseNet.benchmark.bit_depth_transform import BitDepthSimulation
 
         additional_transforms = [
             BitDepthSimulation(bit_depth_range=(8, 12), p=1.0),
