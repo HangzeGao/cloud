@@ -1,13 +1,20 @@
 """
 位深度估计器模块
 
-包含三种位深度估计器实现，支持8-13位深度范围。
+包含三种位深度估计器实现。
+位深度范围由 bit_depth_config.py 统一管理。
 """
 
 from typing import Tuple
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+
+from .bit_depth_config import (
+    get_bit_depth_tensor,
+    get_num_bit_depths,
+    get_bit_depth_range,
+)
 
 
 class MinimalBitDepthEstimator(nn.Module):
@@ -18,11 +25,15 @@ class MinimalBitDepthEstimator(nn.Module):
     训练时可以完全关闭，推理时启用
     """
     
-    def __init__(self, in_channels: int = 4, num_bit_depths: int = 6):
+    def __init__(self, in_channels: int = 4, num_bit_depths: int = None):
         super().__init__()
-        self.num_bit_depths = num_bit_depths
-        # 位深度范围 8-13
-        self.register_buffer('bit_depths', torch.tensor([8, 9, 10, 11, 12, 13]).float())
+        # 从配置中心获取默认值
+        self.num_bit_depths = num_bit_depths or get_num_bit_depths()
+        min_bd, max_bd = get_bit_depth_range()
+        
+        # 动态生成位深度tensor
+        self.register_buffer('bit_depths', get_bit_depth_tensor())
+        self.register_buffer('min_bit_depth', torch.tensor(min_bd).float())
     
     @torch.no_grad()
     def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
@@ -34,13 +45,15 @@ class MinimalBitDepthEstimator(nn.Module):
         dynamic_range = (x_flat.max(dim=2)[0] - x_flat.min(dim=2)[0]).mean(dim=1)  # [B]
         
         # 启发式规则：动态范围小的更可能是低比特
-        # 8-bit通常<0.9, 10-bit通常>0.95, 12-bit通常接近1.0, 13-bit更接近1.0
-        estimated = torch.clamp(8 + (dynamic_range - 0.8) * 20, 8, 13)
+        min_bd = float(self.min_bit_depth)
+        max_bd = float(self.bit_depths.max())
+        scale_factor = (max_bd - min_bd) / 0.2  # 假设0.8-1.0映射到整个范围
+        estimated = torch.clamp(min_bd + (dynamic_range - 0.8) * scale_factor, min_bd, max_bd)
         
         # 创建伪logits（用于兼容性）
         logits = torch.zeros(B, self.num_bit_depths, device=x.device)
-        # 在估计值附近设置高概率（索引范围0-5，对应8-13）
-        idx = (estimated - 8).long().clamp(0, 5)
+        # 在估计值附近设置高概率
+        idx = (estimated - min_bd).long().clamp(0, self.num_bit_depths - 1)
         logits.scatter_(1, idx.unsqueeze(1), 1.0)
         
         return logits, estimated
@@ -54,8 +67,10 @@ class ConvBitDepthEstimator(nn.Module):
     复杂度：O(H*W)，但并行度高，实际很快
     """
     
-    def __init__(self, in_channels: int = 4, num_bit_depths: int = 6):
+    def __init__(self, in_channels: int = 4, num_bit_depths: int = None):
         super().__init__()
+        # 从配置中心获取默认值
+        num_bit_depths = num_bit_depths or get_num_bit_depths()
         
         # 极轻量编码器：只下采样4次
         self.encoder = nn.Sequential(
@@ -78,8 +93,8 @@ class ConvBitDepthEstimator(nn.Module):
             nn.Linear(32, num_bit_depths),
         )
         
-        # 位深度范围 8-13
-        self.register_buffer('bit_depths', torch.tensor([8, 9, 10, 11, 12, 13]).float())
+        # 动态生成位深度tensor
+        self.register_buffer('bit_depths', get_bit_depth_tensor())
     
     def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         features = self.encoder(x)
@@ -102,10 +117,11 @@ class StatisticalBitDepthEstimator(nn.Module):
     - 增加直方图近似百分位数（向量化，无排序）
     """
     
-    def __init__(self, in_channels: int = 4, hidden_dim: int = 32, num_bit_depths: int = 6):
+    def __init__(self, in_channels: int = 4, hidden_dim: int = 32, num_bit_depths: int = None):
         super().__init__()
         self.in_channels = in_channels
-        self.num_bit_depths = num_bit_depths
+        # 从配置中心获取默认值
+        self.num_bit_depths = num_bit_depths or get_num_bit_depths()
 
         stat_dim = in_channels * 10
 
@@ -113,11 +129,11 @@ class StatisticalBitDepthEstimator(nn.Module):
             nn.Linear(stat_dim, hidden_dim),
             nn.ReLU(inplace=True),
             nn.Dropout(0.1),
-            nn.Linear(hidden_dim, num_bit_depths),
+            nn.Linear(hidden_dim, self.num_bit_depths),
         )
 
-        # 位深度值映射 (8-13)
-        self.register_buffer('bit_depths', torch.tensor([8, 9, 10, 11, 12, 13]).float())
+        # 动态生成位深度tensor
+        self.register_buffer('bit_depths', get_bit_depth_tensor())
         self.register_buffer('hist_bins', torch.linspace(0, 1, 65))
         
     def extract_statistics(self, x: torch.Tensor) -> torch.Tensor:
@@ -195,13 +211,31 @@ ESTIMATOR_CONFIGS = {
 def create_bit_depth_estimator(
     estimator_type: str,
     in_channels: int = 4,
-    num_bit_depths: int = 6,
+    num_bit_depths: int = None,
 ):
+    """
+    工厂函数：创建指定位深度估计器
+    
+    Args:
+        estimator_type: 'minimal', 'conv', 'statistical'
+        in_channels: 输入通道数
+        num_bit_depths: 位深度类别数（None则使用配置中心默认值）
+    
+    Returns:
+        BitDepthEstimator 实例
+    
+    Example:
+        >>> estimator = create_bit_depth_estimator('conv', in_channels=4)
+        >>> logits, estimated = estimator(x)
+    """
     if estimator_type not in ESTIMATOR_CONFIGS:
         raise ValueError(
             f"Unknown estimator_type: {estimator_type}. "
             f"Choose from {list(ESTIMATOR_CONFIGS.keys())}"
         )
+    
+    # 如果未指定，从配置中心获取
+    num_bit_depths = num_bit_depths or get_num_bit_depths()
     
     estimator_class = ESTIMATOR_CONFIGS[estimator_type]['class']
     return estimator_class(in_channels, num_bit_depths)

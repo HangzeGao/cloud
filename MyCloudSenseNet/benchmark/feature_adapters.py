@@ -1,16 +1,17 @@
 """
 FeatureAdapter 变体 - 不同速度与精度的平衡
 
-包含原版和三种优化实现：
-1. FeatureAdapter (原版): 完整的位深度调制特征适配
-2. UltraLightFeatureAdapter: 最快，只保留核心调制
-3. LightFeatureAdapter: 平衡，移除BN和复杂注意力
-4. ConditionalFeatureAdapter: 条件执行，根据位深度决定是否适配
+位深度范围由 bit_depth_config.py 统一管理。
 """
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+
+from .bit_depth_config import (
+    get_num_bit_depths,
+    get_bit_depth_range,
+)
 
 
 class FeatureAdapter(nn.Module):
@@ -26,10 +27,11 @@ class FeatureAdapter(nn.Module):
     实现：基于通道注意力的轻量调整
     """
     
-    def __init__(self, feature_dim: int, num_bit_depths: int = 6, reduction: int = 16):
+    def __init__(self, feature_dim: int, num_bit_depths: int = None, reduction: int = 16):
         super().__init__()
         self.feature_dim = feature_dim
-        self.num_bit_depths = num_bit_depths
+        # 从配置中心获取默认值
+        self.num_bit_depths = num_bit_depths or get_num_bit_depths()
         
         # 位深度嵌入：将位深度类别映射为特征向量
         self.bit_depth_embedding = nn.Embedding(num_bit_depths, feature_dim)
@@ -100,10 +102,12 @@ class UltraLightFeatureAdapter(nn.Module):
     性能：比原版快约 3-5x
     """
     
-    def __init__(self, feature_dim: int, num_bit_depths: int = 6):
+    def __init__(self, feature_dim: int, num_bit_depths: int = None):
         super().__init__()
         self.feature_dim = feature_dim
-        
+        # 从配置中心获取默认值
+        num_bit_depths = num_bit_depths or get_num_bit_depths()
+
         # 单层通道注意力（极简）
         self.channel_gate = nn.Sequential(
             nn.AdaptiveAvgPool2d(1),
@@ -149,11 +153,13 @@ class LightFeatureAdapter(nn.Module):
     - 软嵌入改为硬选择（更快但可能损失一点精度）
     """
     
-    def __init__(self, feature_dim: int, num_bit_depths: int = 6, use_hard_selection: bool = True):
+    def __init__(self, feature_dim: int, num_bit_depths: int = None, use_hard_selection: bool = True):
         super().__init__()
         self.feature_dim = feature_dim
         self.use_hard_selection = use_hard_selection
-        
+        # 从配置中心获取默认值
+        num_bit_depths = num_bit_depths or get_num_bit_depths()
+
         # 位深度嵌入（保持）
         self.bit_depth_embedding = nn.Embedding(num_bit_depths, feature_dim)
         
@@ -204,11 +210,13 @@ class ConditionalFeatureAdapter(nn.Module):
     通过门控机制，大部分样本走快速路径
     """
     
-    def __init__(self, feature_dim: int, num_bit_depths: int = 6, skip_threshold: float = 0.8):
+    def __init__(self, feature_dim: int, num_bit_depths: int = None, skip_threshold: float = 0.8):
         super().__init__()
         self.feature_dim = feature_dim
         self.skip_threshold = skip_threshold  # 当10-bit概率>此值时跳过适配
-        
+        # 从配置中心获取默认值
+        num_bit_depths = num_bit_depths or get_num_bit_depths()
+
         # 门控网络：决定是否适配
         self.gate = nn.Sequential(
             nn.Linear(num_bit_depths, 1),
@@ -291,9 +299,26 @@ ADAPTER_CONFIGS = {
 }
 
 
-def create_feature_adapter(adapter_type: str, feature_dim: int, num_bit_depths: int = 6):
+def create_feature_adapter(adapter_type: str, feature_dim: int, num_bit_depths: int = None):
+    """
+    工厂函数：创建指定类型的 FeatureAdapter
+
+    Args:
+        adapter_type: 'original', 'ultra_light', 'light', 'conditional', 'none'
+        feature_dim: 特征维度
+        num_bit_depths: 位深度类别数（None则使用配置中心默认值）
+
+    Returns:
+        FeatureAdapter 实例
+
+    Example:
+        >>> adapter = create_feature_adapter('ultra_light', feature_dim=512)
+    """
     if adapter_type not in ADAPTER_CONFIGS:
         raise ValueError(f"Unknown adapter_type: {adapter_type}. Choose from {list(ADAPTER_CONFIGS.keys())}")
-    
+
+    # 如果未指定，从配置中心获取
+    num_bit_depths = num_bit_depths or get_num_bit_depths()
+
     adapter_class = ADAPTER_CONFIGS[adapter_type]['class']
     return adapter_class(feature_dim, num_bit_depths)

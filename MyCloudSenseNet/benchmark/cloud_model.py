@@ -54,7 +54,7 @@ class CloudModel(pl.LightningModule):
         self.backbone = self.hparams.get("backbone", "timm-efficientnet-b0")
         self.weights = self.hparams.get("weights", "imagenet")
 
-        self.learning_rate = self.hparams.get("lr", 1e-3)
+        self.learning_rate = self.hparams.get("lr", 1e-4)
         self.patience = self.hparams.get("patience", 8)
         self.num_workers = self.hparams.get("num_workers", 0)
         self.batch_size = self.hparams.get("batch_size", 4)
@@ -109,13 +109,8 @@ class CloudModel(pl.LightningModule):
             weight=torch.tensor([0.1, 0.4, 0.5], device=self.device_type),
             reduction="mean"
         )(preds, y)
-        
         dice_loss = smp.losses.DiceLoss(mode="multiclass", from_logits=True)(preds, y)
-        
         loss = 0.5 * ce_loss + 0.5 * dice_loss
-        
-        self.log("train/ce_loss", ce_loss, on_step=True, on_epoch=True, prog_bar=True)
-        self.log("train/dice_loss", dice_loss, on_step=True, on_epoch=True, prog_bar=True)
         self.log("train/loss", loss, on_step=True, on_epoch=True, prog_bar=True)
         
         if self.enable_bit_depth_adaptation and hasattr(self.model.encoder, 'get_bit_depth_info'):

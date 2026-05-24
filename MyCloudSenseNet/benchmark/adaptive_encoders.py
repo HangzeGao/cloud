@@ -15,6 +15,7 @@ import torch.nn.functional as F
 
 from .bit_depth_estimators import create_bit_depth_estimator
 from .feature_adapters import create_feature_adapter
+from .bit_depth_config import get_num_bit_depths
 
 
 class BitDepthAdaptiveEncoder(nn.Module):
@@ -57,9 +58,9 @@ class BitDepthAdaptiveEncoder(nn.Module):
 
         # 初始化特征适配器
         self.feature_adapter = create_feature_adapter(
-            adapter_type=adapter_type, 
-            feature_dim=feature_dim, 
-            num_bit_depths=6
+            adapter_type=adapter_type,
+            feature_dim=feature_dim,
+            num_bit_depths=get_num_bit_depths()
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
