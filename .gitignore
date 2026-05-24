@@ -20,7 +20,8 @@ ENV/
 *.swo
 
 # Model checkpoints and logs
-benchmark/
+benchmark/unet/
+benchmark/segformer/
 experiments/
 experiments_*/
 checkpoints/
