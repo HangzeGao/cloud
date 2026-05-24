@@ -54,7 +54,7 @@ class CloudModel(pl.LightningModule):
         self.backbone = self.hparams.get("backbone", "timm-efficientnet-b0")
         self.weights = self.hparams.get("weights", "imagenet")
 
-        self.learning_rate = self.hparams.get("lr", 1e-4)
+        self.learning_rate = self.hparams.get("lr", 1e-3)
         self.patience = self.hparams.get("patience", 8)
         self.num_workers = self.hparams.get("num_workers", 0)
         self.batch_size = self.hparams.get("batch_size", 4)
@@ -207,7 +207,7 @@ class CloudModel(pl.LightningModule):
             model = smp.Unet(
                 encoder_name=self.backbone,
                 encoder_weights=self.weights,
-                decoder_attention_type="scse",
+                # decoder_attention_type="scse",
                 decoder_interpolation="bilinear",
                 in_channels=self.in_channels,
                 classes=self.num_classes,
