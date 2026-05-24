@@ -237,6 +237,7 @@ class CloudModel(pl.LightningModule):
                     feature_dim = out_ch
             adaptive_encoder = create_bit_depth_adaptive_encoder(
                 encoder_type=self.encoder_type,
+                base_encoder=model.encoder,
                 in_channels=self.in_channels,
                 feature_dim=feature_dim,
                 estimator_type=self.estimator_type,
