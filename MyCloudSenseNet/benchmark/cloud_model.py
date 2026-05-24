@@ -489,7 +489,7 @@ class CloudModel(pl.LightningModule):
             x: 输入图像 [B, C, H, W]，范围 [0, 1]
             target_bit_depth: 目标位深度
         """
-        if target_bit_depth >= 10:
+        if target_bit_depth > 12:
             return x
 
         # 将 [0, 1] 映射到 [0, 2^bit_depth - 1]

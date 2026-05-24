@@ -6,7 +6,7 @@ import rasterio
 import torch
 
 
-def normalize_data_numpy(data, max_pixel=1):
+def normalize_by_minmax(data, max_pixel=1):
     min_val = float(np.nanmin(data))
     max_val = float(np.nanmax(data))
     range_val = max_val - min_val
@@ -94,7 +94,7 @@ class CloudDataset(torch.utils.data.Dataset):
             with rasterio.open(img[f"{band}_path"]) as b:
                 band_arr = b.read(1).astype("float32")
                 # band_arr = normalize_by_bit_depth(band_arr, self.bit_depth)
-                band_arr = normalize_data_numpy(band_arr)
+                band_arr = normalize_by_minmax(band_arr)
             band_arrs.append(band_arr)
         x_arr = np.stack(band_arrs, axis=-1)
 
