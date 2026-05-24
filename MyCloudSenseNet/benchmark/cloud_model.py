@@ -10,7 +10,7 @@ import torch.nn.functional as F
 
 from MyCloudSenseNet.benchmark.cloud_dataset import CloudDataset
 from MyCloudSenseNet.benchmark.losses import intersection_over_union
-from MyCloudSenseNet.benchmark.bit_depth_modules import (
+from MyCloudSenseNet.benchmark.adaptive_encoders import (
     BitDepthAdaptiveEncoder,
     SimpleBitDepthAdaptiveEncoder,
 )
