@@ -197,21 +197,6 @@ def create_bit_depth_estimator(
     in_channels: int = 4,
     num_bit_depths: int = 6,
 ):
-    """
-    工厂函数：创建指定位深度估计器
-    
-    Args:
-        estimator_type: 'minimal', 'conv', 'statistical'
-        in_channels: 输入通道数
-        num_bit_depths: 位深度类别数（默认6，对应8-13）
-    
-    Returns:
-        BitDepthEstimator 实例
-    
-    Example:
-        >>> estimator = create_bit_depth_estimator('conv', in_channels=4)
-        >>> logits, estimated = estimator(x)
-    """
     if estimator_type not in ESTIMATOR_CONFIGS:
         raise ValueError(
             f"Unknown estimator_type: {estimator_type}. "

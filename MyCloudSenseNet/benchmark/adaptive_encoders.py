@@ -186,29 +186,6 @@ def create_bit_depth_adaptive_encoder(
     estimator_type: str = 'conv',
     adapter_type: str = 'ultra_light',
 ):
-    """
-    工厂函数：创建指定位深度自适应编码器
-    
-    Args:
-        encoder_type: 'full' 或 'simple'
-        base_encoder: 基础编码器（如ResNet、EfficientNet等）
-        in_channels: 输入通道数
-        feature_dim: 特征维度（None则自动检测）
-        estimator_type: 估计器类型 ('minimal', 'conv', 'statistical')
-        adapter_type: 适配器类型 ('none', 'ultra_light', 'light', 'conditional', 'original')
-                      仅当 encoder_type='full' 时有效
-    
-    Returns:
-        BitDepthAdaptiveEncoder 实例
-    
-    Example:
-        >>> encoder = create_bit_depth_adaptive_encoder(
-        ...     'full',
-        ...     base_encoder=resnet50,
-        ...     estimator_type='conv',
-        ...     adapter_type='ultra_light'
-        ... )
-    """
     if encoder_type not in ENCODER_CONFIGS:
         raise ValueError(
             f"Unknown encoder_type: {encoder_type}. "

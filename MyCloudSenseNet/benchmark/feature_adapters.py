@@ -292,20 +292,6 @@ ADAPTER_CONFIGS = {
 
 
 def create_feature_adapter(adapter_type: str, feature_dim: int, num_bit_depths: int = 6):
-    """
-    工厂函数：创建指定类型的 FeatureAdapter
-    
-    Args:
-        adapter_type: 'original', 'ultra_light', 'light', 'conditional', 'none'
-        feature_dim: 特征维度
-        num_bit_depths: 位深度类别数
-    
-    Returns:
-        FeatureAdapter 实例
-    
-    Example:
-        >>> adapter = create_feature_adapter('ultra_light', feature_dim=512)
-    """
     if adapter_type not in ADAPTER_CONFIGS:
         raise ValueError(f"Unknown adapter_type: {adapter_type}. Choose from {list(ADAPTER_CONFIGS.keys())}")
     
