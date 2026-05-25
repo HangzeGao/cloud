@@ -1,6 +1,10 @@
 from typing import Optional, List
 
-import albumentations as A
+try:
+    import albumentations as A
+except ImportError:
+    A = None
+
 import numpy as np
 import pandas as pd
 import rasterio
@@ -73,7 +77,7 @@ class CloudDataset(torch.utils.data.Dataset):
         bands: List[str],
         y_paths: Optional[pd.DataFrame] = None,
         bit_depth: Optional[int] = 10,
-        transforms: Optional[A.Compose] = None,
+        transforms: Optional = None,
     ):
         """
         Instantiate the CloudDataset class.

@@ -1,6 +1,10 @@
 from typing import Optional, List
 
-import albumentations as A
+try:
+    import albumentations as A
+except ImportError:
+    A = None
+
 import pandas as pd
 import pytorch_lightning as pl
 import segmentation_models_pytorch as smp
@@ -249,8 +253,11 @@ class CloudModel(pl.LightningModule):
         return model
 
     def _create_transforms(self):
-        transforms = [
-            A.HorizontalFlip(p=0.5),
-            A.VerticalFlip(p=0.5),
-        ]
-        return A.Compose(transforms)
+        if A:
+            transforms = [
+                A.HorizontalFlip(p=0.5),
+                A.VerticalFlip(p=0.5),
+            ]
+            return A.Compose(transforms)
+        else:
+            return None
