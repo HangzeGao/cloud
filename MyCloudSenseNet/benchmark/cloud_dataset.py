@@ -12,8 +12,8 @@ def normalize_by_minmax(data, max_pixel=1):
     max_val = float(np.nanmax(data))
     range_val = max_val - min_val
     if range_val == 0:
-        return data.copy()
-    data = (data.copy() - min_val) / range_val
+        return data
+    data = (data - min_val) / range_val
     data *= max_pixel
     return data
 

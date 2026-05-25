@@ -9,7 +9,7 @@ from typing import List, Tuple
 # ========================= 唯一需要修改的地方 =========================
 # 定义位深度范围 [MIN_BIT_DEPTH, MAX_BIT_DEPTH]（包含边界）
 MIN_BIT_DEPTH = 8
-MAX_BIT_DEPTH = 13
+MAX_BIT_DEPTH = 12
 # =====================================================================
 
 

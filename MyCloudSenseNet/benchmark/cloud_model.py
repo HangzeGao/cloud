@@ -54,9 +54,9 @@ class CloudModel(pl.LightningModule):
         self.backbone = self.hparams.get("backbone", "timm-efficientnet-b0")
         self.weights = self.hparams.get("weights", "imagenet")
 
-        self.learning_rate = self.hparams.get("lr", 1e-3)
+        self.learning_rate = self.hparams.get("lr", 1e-4)
         self.patience = self.hparams.get("patience", 8)
-        self.num_workers = self.hparams.get("num_workers", 0)
+        self.num_workers = self.hparams.get("num_workers", 1)
         self.batch_size = self.hparams.get("batch_size", 4)
 
         self.device_type = get_device()
@@ -144,22 +144,25 @@ class CloudModel(pl.LightningModule):
         return iou
 
     def train_dataloader(self):
-        return torch.utils.data.DataLoader(
-            self.train_dataset,
-            batch_size=self.batch_size,
-            num_workers=self.num_workers,
-            shuffle=True,
-            pin_memory=True if self.device_type == "cuda" else False,
-        )
+        loader_kwargs = {
+            "batch_size": self.batch_size,
+            "num_workers": self.num_workers,
+            "shuffle": True,
+            "pin_memory": True if self.device_type == "cuda" else False,
+        }
+        if self.num_workers > 0:
+            loader_kwargs["persistent_workers"] = True
+            loader_kwargs["prefetch_factor"] = 2
+        return torch.utils.data.DataLoader(self.train_dataset, **loader_kwargs)
 
     def val_dataloader(self):
-        return torch.utils.data.DataLoader(
-            self.val_dataset,
-            batch_size=self.batch_size,
-            num_workers=0,
-            shuffle=False,
-            pin_memory=True if self.device_type == "cuda" else False,
-        )
+        loader_kwargs = {
+            "batch_size": self.batch_size,
+            "num_workers": 0,
+            "shuffle": False,
+            "pin_memory": True if self.device_type == "cuda" else False,
+        }
+        return torch.utils.data.DataLoader(self.val_dataset, **loader_kwargs)
 
     def configure_optimizers(self):
         param_groups = [
