@@ -59,8 +59,8 @@ class CloudModel(pl.LightningModule):
         self.weights = self.hparams.get("weights", "imagenet")
 
         self.learning_rate = self.hparams.get("lr", 1e-4)
-        self.patience = self.hparams.get("patience", 8)
-        self.num_workers = self.hparams.get("num_workers", 1)
+        self.patience = self.hparams.get("patience", 3)
+        self.num_workers = self.hparams.get("num_workers", 0)
         self.batch_size = self.hparams.get("batch_size", 4)
 
         self.device_type = get_device()
@@ -116,12 +116,15 @@ class CloudModel(pl.LightningModule):
         dice_loss = smp.losses.DiceLoss(mode="multiclass", from_logits=True)(preds, y)
         loss = 0.5 * ce_loss + 0.5 * dice_loss
         self.log("train/loss", loss, on_step=True, on_epoch=True, prog_bar=True)
-        
+
+        lr = self.trainer.optimizers[0].param_groups[0]['lr']
+        self.log("train/lr", lr, on_step=False, on_epoch=True, prog_bar=True)
+
         if self.enable_bit_depth_adaptation and hasattr(self.model.encoder, 'get_bit_depth_info'):
             bd_info = self.model.encoder.get_bit_depth_info()
             if bd_info is not None:
                 self.log("train/est_bit_depth", bd_info['estimated'].mean(), on_step=True, on_epoch=True)
-        
+
         return loss
 
     def validation_step(self, batch: dict, batch_idx: int):
@@ -137,7 +140,7 @@ class CloudModel(pl.LightningModule):
         preds_class = torch.argmax(preds, dim=1)
         
         iou = intersection_over_union(preds_class, y)
-        
+
         self.log("val/iou", iou, on_step=True, on_epoch=True, prog_bar=True)
         
         if self.enable_bit_depth_adaptation and hasattr(self.model.encoder, 'get_bit_depth_info'):
