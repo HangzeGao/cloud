@@ -9,13 +9,14 @@
 """
 
 from typing import Optional, Dict
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from .bit_depth_estimators import create_bit_depth_estimator
-from .feature_adapters import create_feature_adapter
-from .bit_depth_config import get_num_bit_depths
+from benchmark import pretty_print_dict
+from benchmark.bit_depth_estimators import BitDepthEstimatorFactory
+from benchmark.feature_adapters import FeatureAdapterFactory
 
 
 class BitDepthAdaptiveEncoder(nn.Module):
@@ -40,7 +41,7 @@ class BitDepthAdaptiveEncoder(nn.Module):
         self.adapter_type = adapter_type
 
         # 初始化位深度估计器
-        self.bit_depth_estimator = create_bit_depth_estimator(
+        self.bit_depth_estimator = BitDepthEstimatorFactory.create(
             estimator_type=estimator_type,
             in_channels=in_channels,
         )
@@ -57,10 +58,9 @@ class BitDepthAdaptiveEncoder(nn.Module):
                 feature_dim = 512
 
         # 初始化特征适配器
-        self.feature_adapter = create_feature_adapter(
+        self.feature_adapter = FeatureAdapterFactory.create(
             adapter_type=adapter_type,
             feature_dim=feature_dim,
-            num_bit_depths=get_num_bit_depths()
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -112,36 +112,84 @@ class BitDepthAdaptiveEncoder(nn.Module):
         return None
 
 
-# 预定义配置
-ENCODER_CONFIGS = {
-    'bit_depth': {
-        'class': BitDepthAdaptiveEncoder,
-        'description': '完整版，支持位深度估计和特征适配',
-        'features': 'estimate + adapt',
-    },
-}
+class AdaptiveEncoderFactory:
+    """Factory for creating adaptive encoders."""
 
+    _ENCODER_CONFIGS = {
+        'bit_depth': {
+            'class': BitDepthAdaptiveEncoder,
+            'description': '完整版，支持位深度估计和特征适配',
+            'features': 'estimate + adapt',
+        },
+        # Add more encoder types here as needed
+    }
 
-def create_adaptive_encoder(
-    encoder_type: str,
-    base_encoder: nn.Module,
-    in_channels: int = 4,
-    feature_dim: int = None,
-    estimator_type: str = 'conv',
-    adapter_type: str = 'ultra_light',
-):
-    if encoder_type not in ENCODER_CONFIGS:
-        raise ValueError(
-            f"Unknown encoder_type: {encoder_type}. "
-            f"Choose from {list(ENCODER_CONFIGS.keys())}"
+    @staticmethod
+    def create(
+            encoder_type: str,
+            base_encoder: nn.Module,
+            in_channels: int = 4,
+            feature_dim: int = None,
+            estimator_type: str = 'conv',
+            adapter_type: str = 'ultra_light',
+    ):
+        """
+        Static factory method to create an adaptive encoder instance.
+
+        Args:
+            encoder_type: Key identifying the encoder configuration.
+            base_encoder: The base encoder module to wrap/adapt.
+            in_channels: Number of input channels.
+            feature_dim: Dimension of features (optional).
+            estimator_type: Type of estimator to use.
+            adapter_type: Type of adapter to use.
+
+        Returns:
+            An instance of the requested adaptive encoder.
+
+        Raises:
+            ValueError: If encoder_type is not registered.
+        """
+        if encoder_type not in AdaptiveEncoderFactory._ENCODER_CONFIGS:
+            available = list(AdaptiveEncoderFactory._ENCODER_CONFIGS.keys())
+            raise ValueError(
+                f"Unknown encoder_type: {encoder_type}. "
+                f"Choose from {available}"
+            )
+
+        encoder_class = AdaptiveEncoderFactory._ENCODER_CONFIGS[encoder_type]['class']
+
+        return encoder_class(
+            base_encoder=base_encoder,
+            in_channels=in_channels,
+            feature_dim=feature_dim,
+            estimator_type=estimator_type,
+            adapter_type=adapter_type,
         )
-    
-    encoder_class = ENCODER_CONFIGS[encoder_type]['class']
 
-    return encoder_class(
-        base_encoder=base_encoder,
-        in_channels=in_channels,
-        feature_dim=feature_dim,
-        estimator_type=estimator_type,
-        adapter_type=adapter_type,
-    )
+    @classmethod
+    def register(
+            cls,
+            name: str,
+            encoder_class: type,
+            description: str = '',
+            features: str = '',
+    ):
+        """Register a new encoder type dynamically."""
+        cls._ENCODER_CONFIGS[name] = {
+            'class': encoder_class,
+            'description': description,
+            'features': features,
+        }
+
+    @classmethod
+    def list_configs(cls):
+        """Return available encoder configurations (without class references)."""
+        return {
+            k: {'description': v['description'], 'features': v['features']}
+            for k, v in cls._ENCODER_CONFIGS.items()
+        }
+
+
+if __name__ == '__main__':
+    print(pretty_print_dict(AdaptiveEncoderFactory.list_configs()))

@@ -1,17 +1,12 @@
 """
 FeatureAdapter 变体 - 不同速度与精度的平衡
-
-位深度范围由 bit_depth_config.py 统一管理。
 """
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from .bit_depth_config import (
-    get_num_bit_depths,
-    get_bit_depth_range,
-)
+from benchmark import get_num_bit_depths, pretty_print_dict
 
 
 class FeatureAdapter(nn.Module):
@@ -27,12 +22,8 @@ class FeatureAdapter(nn.Module):
     实现：基于通道注意力的轻量调整
     """
     
-    def __init__(self, feature_dim: int, num_bit_depths: int = None, reduction: int = 16):
+    def __init__(self, feature_dim: int, num_bit_depths: int, reduction: int = 16):
         super().__init__()
-        self.feature_dim = feature_dim
-        # 从配置中心获取默认值
-        self.num_bit_depths = num_bit_depths or get_num_bit_depths()
-        
         # 位深度嵌入：将位深度类别映射为特征向量
         self.bit_depth_embedding = nn.Embedding(num_bit_depths, feature_dim)
         
@@ -102,12 +93,8 @@ class UltraLightFeatureAdapter(nn.Module):
     性能：比原版快约 3-5x
     """
     
-    def __init__(self, feature_dim: int, num_bit_depths: int = None):
+    def __init__(self, feature_dim: int, num_bit_depths: int):
         super().__init__()
-        self.feature_dim = feature_dim
-        # 从配置中心获取默认值
-        num_bit_depths = num_bit_depths or get_num_bit_depths()
-
         # 单层通道注意力（极简）
         self.channel_gate = nn.Sequential(
             nn.AdaptiveAvgPool2d(1),
@@ -153,12 +140,9 @@ class LightFeatureAdapter(nn.Module):
     - 软嵌入改为硬选择（更快但可能损失一点精度）
     """
     
-    def __init__(self, feature_dim: int, num_bit_depths: int = None, use_hard_selection: bool = True):
+    def __init__(self, feature_dim: int, num_bit_depths: int, use_hard_selection: bool = True):
         super().__init__()
-        self.feature_dim = feature_dim
         self.use_hard_selection = use_hard_selection
-        # 从配置中心获取默认值
-        num_bit_depths = num_bit_depths or get_num_bit_depths()
 
         # 位深度嵌入（保持）
         self.bit_depth_embedding = nn.Embedding(num_bit_depths, feature_dim)
@@ -210,12 +194,9 @@ class ConditionalFeatureAdapter(nn.Module):
     通过门控机制，大部分样本走快速路径
     """
     
-    def __init__(self, feature_dim: int, num_bit_depths: int = None, skip_threshold: float = 0.8):
+    def __init__(self, feature_dim: int, num_bit_depths: int, skip_threshold: float = 0.8):
         super().__init__()
-        self.feature_dim = feature_dim
         self.skip_threshold = skip_threshold  # 当10-bit概率>此值时跳过适配
-        # 从配置中心获取默认值
-        num_bit_depths = num_bit_depths or get_num_bit_depths()
 
         # 门控网络：决定是否适配
         self.gate = nn.Sequential(
@@ -262,63 +243,87 @@ class NoOpFeatureAdapter(nn.Module):
     
     def __init__(self, feature_dim: int = None, num_bit_depths: int = None):
         super().__init__()
-        # 无参数
-        
+
     def forward(self, features: torch.Tensor, bit_depth_logits: torch.Tensor = None) -> torch.Tensor:
-        # 直接返回输入，不做任何计算
         return features
 
 
-# 预定义配置
-ADAPTER_CONFIGS = {
-    'ultra_light': {
-        'class': UltraLightFeatureAdapter,
-        'description': '最快，精度略有下降（约-1%）',
-        'speedup': '~5x',
-    },
-    'light': {
-        'class': LightFeatureAdapter,
-        'description': '平衡，速度与精度兼顾',
-        'speedup': '~3x',
-    },
-    'conditional': {
-        'class': ConditionalFeatureAdapter,
-        'description': '智能跳过，适合数据分布集中的场景',
-        'speedup': '1-4x（取决于数据分布）',
-    },
-    'none': {
-        'class': NoOpFeatureAdapter,
-        'description': '无适配，只做位深度估计',
-        'speedup': '∞（零开销）',
-    },
-    'original': {
-        'class': FeatureAdapter,  # 原版 FeatureAdapter
-        'description': '原版，精度最高但最慢',
-        'speedup': '1x（baseline）',
-    },
-}
+class FeatureAdapterFactory:
+    """Factory for creating feature adapters."""
+
+    _ADAPTER_CONFIGS = {
+        'ultra_light': {
+            'class': UltraLightFeatureAdapter,
+            'description': '最快，精度略有下降（约-1%）',
+            'speedup': '~5x',
+        },
+        'light': {
+            'class': LightFeatureAdapter,
+            'description': '平衡，速度与精度兼顾',
+            'speedup': '~3x',
+        },
+        'conditional': {
+            'class': ConditionalFeatureAdapter,
+            'description': '智能跳过，适合数据分布集中的场景',
+            'speedup': '1-4x（取决于数据分布）',
+        },
+        'none': {
+            'class': NoOpFeatureAdapter,
+            'description': '无适配，只做位深度估计',
+            'speedup': '∞（零开销）',
+        },
+        'original': {
+            'class': FeatureAdapter,
+            'description': '原版，精度最高但最慢',
+            'speedup': '1x（baseline）',
+        },
+    }
+
+    @staticmethod
+    def create(adapter_type: str, feature_dim: int, num_bit_depths: int = None):
+        """
+        静态工厂方法：创建指定类型的 FeatureAdapter
+
+        Args:
+            adapter_type: 'original', 'ultra_light', 'light', 'conditional', 'none'
+            feature_dim: 特征维度
+            num_bit_depths: 位深度类别数（None则使用配置中心默认值）
+
+        Returns:
+            FeatureAdapter 实例
+
+        Example:
+            >>> adapter = FeatureAdapterFactory.create('ultra_light', feature_dim=512)
+        """
+        if adapter_type not in FeatureAdapterFactory._ADAPTER_CONFIGS:
+            available = list(FeatureAdapterFactory._ADAPTER_CONFIGS.keys())
+            raise ValueError(
+                f"Unknown adapter_type: {adapter_type}. "
+                f"Choose from {available}"
+            )
+
+        num_bit_depths = num_bit_depths or get_num_bit_depths()
+
+        adapter_class = FeatureAdapterFactory._ADAPTER_CONFIGS[adapter_type]['class']
+        return adapter_class(feature_dim, num_bit_depths)
+
+    @classmethod
+    def register(cls, name: str, adapter_class: type, description: str = '', speedup: str = ''):
+        """动态注册新的适配器类型"""
+        cls._ADAPTER_CONFIGS[name] = {
+            'class': adapter_class,
+            'description': description,
+            'speedup': speedup,
+        }
+
+    @classmethod
+    def list_configs(cls):
+        """返回可用的适配器配置（不含类引用）"""
+        return {
+            k: {'description': v['description'], 'speedup': v['speedup']}
+            for k, v in cls._ADAPTER_CONFIGS.items()
+        }
 
 
-def create_feature_adapter(adapter_type: str, feature_dim: int, num_bit_depths: int = None):
-    """
-    工厂函数：创建指定类型的 FeatureAdapter
-
-    Args:
-        adapter_type: 'original', 'ultra_light', 'light', 'conditional', 'none'
-        feature_dim: 特征维度
-        num_bit_depths: 位深度类别数（None则使用配置中心默认值）
-
-    Returns:
-        FeatureAdapter 实例
-
-    Example:
-        >>> adapter = create_feature_adapter('ultra_light', feature_dim=512)
-    """
-    if adapter_type not in ADAPTER_CONFIGS:
-        raise ValueError(f"Unknown adapter_type: {adapter_type}. Choose from {list(ADAPTER_CONFIGS.keys())}")
-
-    # 如果未指定，从配置中心获取
-    num_bit_depths = num_bit_depths or get_num_bit_depths()
-
-    adapter_class = ADAPTER_CONFIGS[adapter_type]['class']
-    return adapter_class(feature_dim, num_bit_depths)
+if __name__ == '__main__':
+    print(pretty_print_dict(FeatureAdapterFactory.list_configs()))

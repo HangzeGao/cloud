@@ -2,19 +2,93 @@
 位深度估计器模块
 
 包含三种位深度估计器实现。
-位深度范围由 bit_depth_config.py 统一管理。
 """
 
-from typing import Tuple
+import json
+from typing import Any, Dict, List, Optional, Tuple
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from .bit_depth_config import (
-    get_bit_depth_tensor,
-    get_num_bit_depths,
-    get_bit_depth_range,
-)
+# 定义位深度范围 [MIN_BIT_DEPTH, MAX_BIT_DEPTH]（包含边界）
+MIN_BIT_DEPTH = 8
+MAX_BIT_DEPTH = 12
+
+
+def get_bit_depth_range() -> Tuple[int, int]:
+    """获取位深度范围"""
+    return MIN_BIT_DEPTH, MAX_BIT_DEPTH
+
+
+def get_num_bit_depths() -> int:
+    """获取位深度类别数"""
+    return MAX_BIT_DEPTH - MIN_BIT_DEPTH + 1
+
+
+def get_bit_depth_values() -> List[int]:
+    """获取所有位深度值列表"""
+    return list(range(MIN_BIT_DEPTH, MAX_BIT_DEPTH + 1))
+
+
+def get_bit_depth_tensor():
+    """获取位深度tensor（用于PyTorch）"""
+    import torch
+    return torch.tensor(get_bit_depth_values()).float()
+
+
+def pretty_print_dict(
+        data: Dict[str, Any],
+        title: Optional[str] = None,
+        indent: int = 2,
+        sort_keys: bool = False,
+        max_width: int = 80,
+) -> str:
+    """
+    优雅打印字典，支持嵌套、中文对齐、标题。
+
+    Args:
+        data: 要打印的字典
+        title: 可选标题（会加边框高亮）
+        indent: 缩进空格数
+        sort_keys: 是否按键排序
+        max_width: 行最大宽度（用于截断提示）
+
+    Returns:
+        格式化后的字符串
+
+    Example:
+        >>> print(pretty_print_dict({'a': 1, 'b': {'c': 2}}, title="Config"))
+    """
+    lines = []
+
+    # 标题
+    if title:
+        lines.append(f"╔{'═' * (len(title) + 4)}╗")
+        lines.append(f"║  {title}  ║")
+        lines.append(f"╚{'═' * (len(title) + 4)}╝")
+        lines.append("")
+
+    # 主体：JSON 风格，但保留中文可读性
+    formatted = json.dumps(
+        data,
+        ensure_ascii=False,
+        indent=indent,
+        sort_keys=sort_keys,
+        default=lambda o: repr(o) if not isinstance(o, (int, float, str, bool, type(None), list, dict)) else o,
+    )
+
+    # 为类引用添加友好提示（如 <class 'Foo'> → class Foo）
+    import re
+    formatted = re.sub(r'"<<class \'([^\']+)\'>"', r'class \1', formatted)
+
+    lines.append(formatted)
+
+    # 底部统计
+    lines.append("")
+    lines.append(f"  └─ 共 {len(data)} 项")
+
+    return "\n".join(lines)
 
 
 class MinimalBitDepthEstimator(nn.Module):
@@ -185,57 +259,92 @@ class StatisticalBitDepthEstimator(nn.Module):
         return logits, estimated_bit_depth
 
 
-# 预定义配置
-ESTIMATOR_CONFIGS = {
-    'minimal': {
-        'class': MinimalBitDepthEstimator,
-        'description': '极简版，无训练开销，仅用于监控',
-        'speed': '⚡⚡⚡ 最快',
-        'trainable': False,
-    },
-    'conv': {
-        'class': ConvBitDepthEstimator,
-        'description': '轻量卷积，平衡速度与精度',
-        'speed': '⚡⚡ 快',
-        'trainable': True,
-    },
-    'statistical': {
-        'class': StatisticalBitDepthEstimator,
-        'description': '统计特征MLP，精度最高但较慢',
-        'speed': '⚡ 中等',
-        'trainable': True,
-    },
-}
+class BitDepthEstimatorFactory:
+    """Factory for creating bit-depth estimators."""
+
+    _ESTIMATOR_CONFIGS = {
+        'minimal': {
+            'class': MinimalBitDepthEstimator,
+            'description': '极简版，无训练开销，仅用于监控',
+            'speed': '⚡⚡⚡ 最快',
+            'trainable': False,
+        },
+        'conv': {
+            'class': ConvBitDepthEstimator,
+            'description': '轻量卷积，平衡速度与精度',
+            'speed': '⚡⚡ 快',
+            'trainable': True,
+        },
+        'statistical': {
+            'class': StatisticalBitDepthEstimator,
+            'description': '统计特征MLP，精度最高但较慢',
+            'speed': '⚡ 中等',
+            'trainable': True,
+        },
+    }
+
+    @staticmethod
+    def create(
+            estimator_type: str,
+            in_channels: int = 4,
+            num_bit_depths: int = None,
+    ):
+        """
+        静态工厂方法：创建指定位深度估计器
+
+        Args:
+            estimator_type: 'minimal', 'conv', 'statistical'
+            in_channels: 输入通道数
+            num_bit_depths: 位深度类别数（None则使用配置中心默认值）
+
+        Returns:
+            BitDepthEstimator 实例
+
+        Example:
+            >>> estimator = BitDepthEstimatorFactory.create('conv', in_channels=4)
+            >>> logits, estimated = estimator(x)
+        """
+        if estimator_type not in BitDepthEstimatorFactory._ESTIMATOR_CONFIGS:
+            available = list(BitDepthEstimatorFactory._ESTIMATOR_CONFIGS.keys())
+            raise ValueError(
+                f"Unknown estimator_type: {estimator_type}. "
+                f"Choose from {available}"
+            )
+
+        num_bit_depths = num_bit_depths or get_num_bit_depths()
+
+        estimator_class = BitDepthEstimatorFactory._ESTIMATOR_CONFIGS[estimator_type]['class']
+        return estimator_class(in_channels, num_bit_depths)
+
+    @classmethod
+    def register(
+            cls,
+            name: str,
+            estimator_class: type,
+            description: str = '',
+            speed: str = '',
+            trainable: bool = True,
+    ):
+        """动态注册新的估计器类型"""
+        cls._ESTIMATOR_CONFIGS[name] = {
+            'class': estimator_class,
+            'description': description,
+            'speed': speed,
+            'trainable': trainable,
+        }
+
+    @classmethod
+    def list_configs(cls):
+        """返回可用的估计器配置（不含类引用）"""
+        return {
+            k: {
+                'description': v['description'],
+                'speed': v['speed'],
+                'trainable': v['trainable'],
+            }
+            for k, v in cls._ESTIMATOR_CONFIGS.items()
+        }
 
 
-def create_bit_depth_estimator(
-    estimator_type: str,
-    in_channels: int = 4,
-    num_bit_depths: int = None,
-):
-    """
-    工厂函数：创建指定位深度估计器
-    
-    Args:
-        estimator_type: 'minimal', 'conv', 'statistical'
-        in_channels: 输入通道数
-        num_bit_depths: 位深度类别数（None则使用配置中心默认值）
-    
-    Returns:
-        BitDepthEstimator 实例
-    
-    Example:
-        >>> estimator = create_bit_depth_estimator('conv', in_channels=4)
-        >>> logits, estimated = estimator(x)
-    """
-    if estimator_type not in ESTIMATOR_CONFIGS:
-        raise ValueError(
-            f"Unknown estimator_type: {estimator_type}. "
-            f"Choose from {list(ESTIMATOR_CONFIGS.keys())}"
-        )
-    
-    # 如果未指定，从配置中心获取
-    num_bit_depths = num_bit_depths or get_num_bit_depths()
-    
-    estimator_class = ESTIMATOR_CONFIGS[estimator_type]['class']
-    return estimator_class(in_channels, num_bit_depths)
+if __name__ == '__main__':
+    print(pretty_print_dict(BitDepthEstimatorFactory.list_configs()))

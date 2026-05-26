@@ -1,4 +1,3 @@
-import numpy as np
 import torch
 
 def intersection_over_union(pred, true, n_classes=3, smooth=1e-6):

@@ -1,5 +1,8 @@
 from typing import Optional, List
 
+from benchmark import CloudDataset, intersection_over_union
+from benchmark.adaptive_encoders import AdaptiveEncoderFactory
+
 try:
     import albumentations as A
 except ImportError:
@@ -9,10 +12,6 @@ import pandas as pd
 import pytorch_lightning as pl
 import segmentation_models_pytorch as smp
 import torch
-
-from MyCloudSenseNet.benchmark.cloud_dataset import CloudDataset
-from MyCloudSenseNet.benchmark.losses import intersection_over_union
-from MyCloudSenseNet.benchmark.adaptive_encoders import create_adaptive_encoder
 
 
 def get_device():
@@ -240,7 +239,7 @@ class CloudModel(pl.LightningModule):
                     feature_dim = out_ch[-1]
                 else:
                     feature_dim = out_ch
-            adaptive_encoder = create_adaptive_encoder(
+            adaptive_encoder = AdaptiveEncoderFactory.create(
                 encoder_type=self.encoder_type,
                 base_encoder=model.encoder,
                 in_channels=self.in_channels,
