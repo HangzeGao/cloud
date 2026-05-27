@@ -39,8 +39,6 @@ __all__ = [
     "is_label_valid",
     "create_rgb_composite",
     "display_thumbnail",
-    "validate_paths_exist",
-    "get_memory_usage",
     # TTA
     "normalize_tta_modes",
     "apply_tta",

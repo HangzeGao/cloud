@@ -41,7 +41,6 @@ __all__ = [
     "mask2label",
     "stretch",
     # Utils - Visualization
-    "display_thumbnail_with_prediction",
     # Models
     "AdaptiveEncoderFactory",
     "get_bit_depth_range",
