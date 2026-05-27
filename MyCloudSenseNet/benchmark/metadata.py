@@ -1,4 +1,5 @@
 import math
+from PIL import Image
 from matplotlib import pyplot as plt
 from tqdm import tqdm
 import pandas as pd
@@ -12,7 +13,6 @@ from typing import Dict, Any, List, Optional, Sequence, Tuple
 import rasterio
 import torch
 import torch.nn.functional as F
-from PIL import Image
 
 from MyCloudSenseNet.benchmark.cloud_dataset import CloudDataset
 from MyCloudSenseNet.benchmark.cloud_model import CloudModel
@@ -588,3 +588,87 @@ class GeoTIFFTiler:
             dst.write(pred_full, 1)
 
         logger.info("Restoration completed!")
+
+
+def intersection_over_union_and_coverage(pred, true, n_classes=3):
+    """
+    Calculates intersection and union for a batch of images.
+    Calculates coverage of each class for a batch of images.
+    """
+    total_pixels = true.size
+    valid_pixel_mask = (true != 255)  # valid pixel mask
+    true = true[valid_pixel_mask]
+    pred = pred[valid_pixel_mask]
+
+    iou_list = []
+    true_coverage_list = []
+    pred_coverage_list = []
+    for cls in range(n_classes):
+        # skip background
+        if cls == 0:
+            continue
+
+        # Prediction/ground truth mask of the current category
+        true_cls = (true == cls)
+        pred_cls = (pred == cls)
+
+        # Intersection and union totals
+        intersection = np.logical_and(true_cls, pred_cls)
+        union = np.logical_or(true_cls, pred_cls)
+
+        iou = intersection.sum() / (union.sum() + 1e-8)
+        iou_list.append(min(iou, 1))
+
+        true_coverage = true_cls.sum() / total_pixels
+        pred_coverage = pred_cls.sum() / total_pixels
+        true_coverage_list.append(true_coverage)
+        pred_coverage_list.append(pred_coverage)
+
+    mIoU = np.mean(iou_list)
+
+    return mIoU, true_coverage_list, pred_coverage_list
+
+def display_thumbnail_more(data_path, pred_path=None, max_size=512):
+    logger.info(f"Displaying thumbnail for {data_path.name}")
+    with rasterio.open(data_path) as src:
+        true = mask2label(src.read(5).astype(np.uint8))
+
+        h, w = src.height, src.width
+        scale = min(max_size / w, max_size / h)
+        new_w, new_h = int(w * scale), int(h * scale)
+        data = src.read(out_shape=(src.count, new_h, new_w),
+                        resampling=rasterio.enums.Resampling.bilinear)
+
+    b = data[0]
+    g = data[1]
+    r = data[2]
+    nir = data[3]
+    mask = data[4]
+    rgb = np.dstack((r, g, b))
+
+    rgb = stretch(rgb)
+
+    fig, ax = plt.subplots(1, 3, figsize=(24, 8))
+
+
+    ax[0].imshow(rgb)
+    ax[0].set_title("RGB Image")
+
+    ax[1].imshow(mask)
+    ax[1].set_title("True Mask Image")
+
+    if pred_path:
+        with rasterio.open(pred_path) as src2:
+            pred = src2.read(1).astype(np.uint8)
+            pred_mask = src2.read(indexes=(1),
+                                  out_shape=(src2.count, new_h, new_w),
+                                  resampling=rasterio.enums.Resampling.bilinear).astype(np.uint8)
+
+        iou, true_cov, pred_cov = intersection_over_union_and_coverage(pred, true)
+
+        ax[1].set_title(f"True Mask Image\nshadow coverage={true_cov[0]:04f} | cloud coverage={true_cov[1]:04f} ")
+        ax[2].imshow(pred_mask)
+        ax[2].set_title(f"Predicted Mask Image with iou={iou:04f}\nshadow coverage={pred_cov[0]:04f} | cloud coverage={pred_cov[1]:04f}")
+
+    plt.tight_layout()
+    plt.show()
