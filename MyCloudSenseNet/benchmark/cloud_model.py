@@ -65,7 +65,7 @@ class CloudModel(pl.LightningModule):
         self.device_type = get_device()
         self.gpu = self.device_type in ("mps", "cuda")
 
-        self.transforms = None
+        self.transforms = self._create_transforms()
 
         self._init_datasets(x_train, y_train, x_val, y_val)
         self.model = self._build_model(model_name)
