@@ -166,7 +166,7 @@ class CloudModel(pl.LightningModule):
             "batch_size": self.batch_size,
             "num_workers": self.num_workers,
             "shuffle": True,
-            "pin_memory": True if self.device_type == "cuda" else False,
+            "pin_memory": self.device_type == "cuda",
         }
         if self.num_workers > 0:
             loader_kwargs["persistent_workers"] = True
@@ -178,7 +178,7 @@ class CloudModel(pl.LightningModule):
             "batch_size": self.batch_size,
             "num_workers": 0,
             "shuffle": False,
-            "pin_memory": True if self.device_type == "cuda" else False,
+            "pin_memory": self.device_type == "cuda",
         }
         return torch.utils.data.DataLoader(self.val_dataset, **loader_kwargs)
 

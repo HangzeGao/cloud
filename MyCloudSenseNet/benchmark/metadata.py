@@ -1,20 +1,24 @@
 import math
-from matplotlib import pyplot as plt
-from tqdm import tqdm
-import pandas as pd
-from loguru import logger
-from pathlib import Path
-import numpy as np
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from functools import partial
-import concurrent
-import concurrent.futures
-from typing import Dict, Any, List, Optional, Sequence, Tuple
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Sequence, Tuple
+
+from matplotlib import pyplot as plt
+from loguru import logger
+import numpy as np
+import pandas as pd
 import rasterio
 import torch
 import torch.nn.functional as F
+from tqdm import tqdm
 
 from MyCloudSenseNet.benchmark.cloud_dataset import CloudDataset
 from MyCloudSenseNet.benchmark.cloud_model import CloudModel
+
+# ---------------------------------------------------------------------------
+# Configuration
+# ---------------------------------------------------------------------------
 
 BANDS = ["B02", "B03", "B04", "B08"]
 CHIP_SIZE = 512
@@ -25,6 +29,10 @@ MODEL_NAME = "unet"
 DEFAULT_TTA_MODES = ("none", "hflip", "vflip", "hvflip")
 PREDICTION_PAD_DIVISOR = 32
 
+
+# ---------------------------------------------------------------------------
+# Basic raster and mask utilities
+# ---------------------------------------------------------------------------
 
 def mask2label(mask):
     label = np.zeros_like(mask, dtype=np.uint8)
@@ -45,6 +53,25 @@ def is_label_valid(label: np.ndarray, valid_threshold: List[float] = VALID_THRES
     valid_percent = valid_pixel / total_pixel
     return valid_threshold[0] <= valid_percent <= valid_threshold[1]
 
+
+def ensure_dir(path: Path) -> Path:
+    path.mkdir(exist_ok=True, parents=True)
+    return path
+
+
+def default_model_weights_path(model_name: str = MODEL_NAME) -> Path:
+    return Path(f"benchmark/{model_name}/assets/cloud_model.pt")
+
+
+def maybe_fast_dev(metadata: pd.DataFrame, model: CloudModel, fast_dev_run: bool) -> pd.DataFrame:
+    if not fast_dev_run:
+        return metadata
+    return metadata.head(max(model.batch_size, 1))
+
+
+# ---------------------------------------------------------------------------
+# TTA and model inference helpers
+# ---------------------------------------------------------------------------
 
 def normalize_tta_modes(tta_modes: Optional[Sequence[str]] = DEFAULT_TTA_MODES) -> Tuple[str, ...]:
     if not tta_modes:
@@ -92,7 +119,7 @@ def predict_batch_probabilities(
 
 
 def load_cloud_model(
-        model_weights_path: Path = Path(f"benchmark/{MODEL_NAME}/assets/cloud_model.pt"),
+        model_weights_path: Path = default_model_weights_path(),
         bands: List[str] = BANDS,
         model_name: str = MODEL_NAME,
 ) -> CloudModel:
@@ -115,16 +142,7 @@ def iter_chip_probability_batches(
     if device_type in ("cuda", "mps"):
         model = model.to(device_type)
 
-    dataset = CloudDataset(x_paths=x_paths.reset_index(drop=True), bands=bands)
-    dataloader = torch.utils.data.DataLoader(
-        dataset,
-        batch_size=model.batch_size,
-        num_workers=model.num_workers,
-        shuffle=False,
-        pin_memory=device_type == "cuda",
-        collate_fn=pad_prediction_batch,
-    )
-
+    dataloader = build_prediction_dataloader(model, x_paths, bands, device_type)
     with torch.no_grad():
         for batch_index, batch in enumerate(dataloader):
             x = batch["chip"]
@@ -133,6 +151,23 @@ def iter_chip_probability_batches(
 
             probs = predict_batch_probabilities(model, x, tta_modes=tta_modes)
             yield batch["chip_id"], probs.detach().cpu().numpy(), batch["shape"]
+
+
+def build_prediction_dataloader(
+        model: CloudModel,
+        x_paths: pd.DataFrame,
+        bands: List[str],
+        device_type: str,
+) -> torch.utils.data.DataLoader:
+    dataset = CloudDataset(x_paths=x_paths.reset_index(drop=True), bands=bands)
+    return torch.utils.data.DataLoader(
+        dataset,
+        batch_size=model.batch_size,
+        num_workers=model.num_workers,
+        shuffle=False,
+        pin_memory=device_type == "cuda",
+        collate_fn=pad_prediction_batch,
+    )
 
 
 def round_up(value: int, divisor: int) -> int:
@@ -159,6 +194,10 @@ def pad_prediction_batch(batch: List[Dict[str, Any]]) -> Dict[str, Any]:
     }
 
 
+# ---------------------------------------------------------------------------
+# Chip metadata and direct chip prediction
+# ---------------------------------------------------------------------------
+
 def save_chip_predictions(
         model: CloudModel,
         x_paths: pd.DataFrame,
@@ -167,24 +206,31 @@ def save_chip_predictions(
         tta_modes: Optional[Sequence[str]] = DEFAULT_TTA_MODES,
         save_probabilities: bool = False,
 ) -> None:
-    pred_out_dir.mkdir(exist_ok=True, parents=True)
+    ensure_dir(pred_out_dir)
     prob_out_dir = pred_out_dir / "probabilities"
     if save_probabilities:
-        prob_out_dir.mkdir(exist_ok=True, parents=True)
+        ensure_dir(prob_out_dir)
 
     metadata_by_chip_id = x_paths.set_index("chip_id")
     for chip_ids, probs, shapes in iter_chip_probability_batches(model, x_paths, bands=bands, tta_modes=tta_modes):
         preds = np.argmax(probs, axis=1).astype("uint8")
         for chip_id, pred, prob, shape in zip(chip_ids, preds, probs, shapes):
-            height, width = shape
-            pred = pred[:height, :width]
-            prob = prob[:, :height, :width]
+            pred, prob = crop_prediction_to_shape(pred, prob, shape)
             row = metadata_by_chip_id.loc[chip_id]
             save_prediction_geotiff(pred, row[f"{bands[0]}_path"], pred_out_dir / f"{chip_id}.tif")
             if save_probabilities:
                 np.save(prob_out_dir / f"{chip_id}.npy", prob.astype("float16"))
 
     logger.info(f"""Saved {len(list(pred_out_dir.glob("*.tif")))} predictions""")
+
+
+def crop_prediction_to_shape(
+        pred: np.ndarray,
+        prob: np.ndarray,
+        shape: Tuple[int, int],
+) -> Tuple[np.ndarray, np.ndarray]:
+    height, width = shape
+    return pred[:height, :width], prob[:, :height, :width]
 
 
 def save_prediction_geotiff(pred: np.ndarray, reference_path: Path | str, output_path: Path) -> None:
@@ -252,7 +298,7 @@ def load_chip_metadata(
     else:
         metadata = get_chip_metadata(features, bands=bands)
 
-    required_columns = {"chip_id", *(f"{band}_path" for band in bands)}
+    required_columns = required_chip_columns(bands)
     missing = required_columns - set(metadata.columns)
     if missing:
         raise ValueError(f"Chip metadata is missing required columns: {sorted(missing)}")
@@ -260,10 +306,14 @@ def load_chip_metadata(
     return metadata
 
 
+def required_chip_columns(bands: List[str] = BANDS) -> set[str]:
+    return {"chip_id", *(f"{band}_path" for band in bands)}
+
+
 def predict_small_chips(
         features: Path | pd.DataFrame,
         pred_out_dir: Path,
-        model_weights_path: Path = Path(f"benchmark/{MODEL_NAME}/assets/cloud_model.pt"),
+        model_weights_path: Path = default_model_weights_path(),
         bands: List[str] = BANDS,
         model_name: str = MODEL_NAME,
         fast_dev_run: bool = False,
@@ -273,8 +323,7 @@ def predict_small_chips(
     x_paths = load_chip_metadata(features, bands=bands)
     model = load_cloud_model(model_weights_path, bands=bands, model_name=model_name)
 
-    if fast_dev_run:
-        x_paths = x_paths.head(max(model.batch_size, 1))
+    x_paths = maybe_fast_dev(x_paths, model, fast_dev_run)
 
     logger.info(f"Found {len(x_paths)} small chips")
     logger.info("Generating small-chip predictions in batches")
@@ -288,6 +337,10 @@ def predict_small_chips(
     )
     return x_paths
 
+
+# ---------------------------------------------------------------------------
+# End-to-end large GeoTIFF tiling, prediction, and restoration
+# ---------------------------------------------------------------------------
 
 class GeoTIFFTiler:
     def __init__(self, df_row: pd.Series, is_for_training: bool = True, display_thumbnail: bool = False):
@@ -387,9 +440,9 @@ class GeoTIFFTiler:
         chip_id = chip_info["chip_id"]
         chip_size = chip_info["chip_size"]
         chip_dir = output_dirs["img"] / chip_id
-        chip_dir.mkdir(exist_ok=True, parents=True)
+        ensure_dir(chip_dir)
         label_out_dir = output_dirs["label"]
-        label_out_dir.mkdir(exist_ok=True, parents=True)
+        ensure_dir(label_out_dir)
 
         meta = {
             "driver": "GTiff",
@@ -454,16 +507,16 @@ class GeoTIFFTiler:
         # if not self.is_for_training:
         #     chip_size = CHIP_SIZE * 2
         self.generate_chip_windows(chip_size=chip_size)
-        csv_out_dir.mkdir(exist_ok=True, parents=True)
-        img_out_dir.mkdir(exist_ok=True, parents=True)
-        label_out_dir.mkdir(exist_ok=True, parents=True)
+        ensure_dir(csv_out_dir)
+        ensure_dir(img_out_dir)
+        ensure_dir(label_out_dir)
 
         filename = self.df_row.filename
         img_chip_out_dir = img_out_dir / filename
         label_chip_out_dir = label_out_dir / filename
 
-        img_chip_out_dir.mkdir(exist_ok=True, parents=True)
-        label_chip_out_dir.mkdir(exist_ok=True, parents=True)
+        ensure_dir(img_chip_out_dir)
+        ensure_dir(label_chip_out_dir)
 
         output_dirs = {
             "img": img_chip_out_dir,
@@ -472,7 +525,7 @@ class GeoTIFFTiler:
 
         metadata = []
         windows = self.info["windows"]
-        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
             process_func = partial(
                 self.get_single_chip,
                 full_data=self.info["data"],
@@ -481,7 +534,7 @@ class GeoTIFFTiler:
             )
             futures = {executor.submit(process_func, win): win for win in windows}
 
-            for future in tqdm(concurrent.futures.as_completed(futures), total=len(windows), desc="Processing chips"):
+            for future in tqdm(as_completed(futures), total=len(windows), desc="Processing chips"):
                 result = future.result()
                 if result:
                     metadata.append(result)
@@ -499,13 +552,11 @@ class GeoTIFFTiler:
             save_probabilities: bool = False,
     ):
         logger.info("Loading model weights")
-        model_weights_path: Path = Path(f"benchmark/{MODEL_NAME}/assets/cloud_model.pt")
+        model_weights_path = default_model_weights_path()
         model = load_cloud_model(model_weights_path, bands=BANDS, model_name=MODEL_NAME)
 
         logger.info("Loading metadata")
-        x_paths = self.info["metadata"]
-        if fast_dev_run:
-            x_paths = x_paths.head(max(model.batch_size, 1))
+        x_paths = maybe_fast_dev(self.info["metadata"], model, fast_dev_run)
         logger.info(f"Found {len(x_paths)} chips")
 
         logger.info("Generating predictions in batches")
@@ -529,16 +580,14 @@ class GeoTIFFTiler:
     ):
         logger.info("Starting predicting chips")
         pred_label_dir = pred_out_dir / self.df_row.filename
-        pred_label_dir.mkdir(exist_ok=True, parents=True)
+        ensure_dir(pred_label_dir)
 
         logger.info("Loading model weights")
-        model_weights_path: Path = Path(f"benchmark/{MODEL_NAME}/assets/cloud_model.pt")
+        model_weights_path = default_model_weights_path()
         model = load_cloud_model(model_weights_path, bands=BANDS, model_name=MODEL_NAME)
 
         logger.info("Loading metadata")
-        x_paths = self.info["metadata"]
-        if fast_dev_run:
-            x_paths = x_paths.head(max(model.batch_size, 1))
+        x_paths = maybe_fast_dev(self.info["metadata"], model, fast_dev_run)
         logger.info(f"Found {len(x_paths)} chips")
 
         height, width = self.info["height"], self.info["width"]
@@ -565,9 +614,7 @@ class GeoTIFFTiler:
                 x1, y1 = int(row["x_start"]), int(row["y_start"])
                 x2, y2 = int(row["x_end"]), int(row["y_end"])
                 chip_h, chip_w = y2 - y1, x2 - x1
-                height, width = shape
-                pred = pred[:height, :width]
-                prob = prob[:, :height, :width]
+                pred, prob = crop_prediction_to_shape(pred, prob, shape)
 
                 prob_full[:, y1:y2, x1:x2] += prob[:, :chip_h, :chip_w]
                 weight_full[y1:y2, x1:x2] += 1
@@ -579,16 +626,7 @@ class GeoTIFFTiler:
 
         weight_full[weight_full == 0] = 1
 
-        if fusion_method == "average":
-            logger.warning("fusion_method='average' now averages class probabilities before argmax.")
-            pred_full = np.argmax(prob_full / weight_full[None, :, :], axis=0).astype(np.uint8)
-        elif fusion_method == "vote":
-            logger.warning("fusion_method='vote' is kept for compatibility; probability fusion is used with TTA.")
-            pred_full = np.argmax(prob_full / weight_full[None, :, :], axis=0).astype(np.uint8)
-        elif fusion_method == "probability":
-            pred_full = np.argmax(prob_full / weight_full[None, :, :], axis=0).astype(np.uint8)
-        else:
-            raise ValueError("fusion_method must be one of: 'probability', 'vote', 'average'")
+        pred_full = fuse_probability_scores(prob_full, weight_full, fusion_method)
 
         logger.info("Saving prediction results as GeoTIFF with geographic coordinates")
         meta.update({
@@ -608,6 +646,21 @@ class GeoTIFFTiler:
 
         logger.info("Restoration completed!")
 
+
+def fuse_probability_scores(
+        prob_full: np.ndarray,
+        weight_full: np.ndarray,
+        fusion_method: str,
+) -> np.ndarray:
+    if fusion_method != "probability":
+        raise ValueError("fusion_method must be one of: 'probability'")
+
+    return np.argmax(prob_full / weight_full[None, :, :], axis=0).astype(np.uint8)
+
+
+# ---------------------------------------------------------------------------
+# Evaluation and visualization
+# ---------------------------------------------------------------------------
 
 def intersection_over_union_and_coverage(pred, true, n_classes=3):
     """
