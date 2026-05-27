@@ -170,7 +170,7 @@ class GeoTIFFReader:
         b, g, r, nir = thumbnail[:4]
         mask = thumbnail[4] if thumbnail.shape[0] > 4 else None
 
-        rgb = create_rgb_composite(np.stack([r, g, b]))
+        rgb = create_rgb_composite(np.stack([b, g, r]))
 
         fig, axes = plt.subplots(1, 2 if mask is not None else 1, figsize=(12, 6))
         if mask is None:

@@ -16,8 +16,6 @@ from benchmark.utils.utils import (
     is_label_valid,
     create_rgb_composite,
     display_thumbnail,
-    validate_paths_exist,
-    get_memory_usage,
 )
 from benchmark.utils.tta import (
     normalize_tta_modes,

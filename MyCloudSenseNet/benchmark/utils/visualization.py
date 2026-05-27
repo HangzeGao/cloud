@@ -12,7 +12,7 @@ import rasterio
 from matplotlib import pyplot as plt
 from loguru import logger
 
-from benchmark.utils.utils import stretch, create_rgb_composite, display_thumbnail
+from benchmark.utils.utils import create_rgb_composite, display_thumbnail
 from benchmark.core.evaluation import read_prediction_and_aligned_true, intersection_over_union
 
 
