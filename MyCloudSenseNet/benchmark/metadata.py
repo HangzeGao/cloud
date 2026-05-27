@@ -13,8 +13,8 @@ import torch
 import torch.nn.functional as F
 from tqdm import tqdm
 
-from MyCloudSenseNet.benchmark.cloud_dataset import CloudDataset
-from MyCloudSenseNet.benchmark.cloud_model import CloudModel
+from benchmark.cloud_dataset import CloudDataset
+from benchmark.cloud_model import CloudModel
 
 # ---------------------------------------------------------------------------
 # Configuration
