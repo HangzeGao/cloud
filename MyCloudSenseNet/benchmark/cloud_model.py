@@ -58,7 +58,7 @@ class CloudModel(pl.LightningModule):
         self.weights = self.hparams.get("weights", "imagenet")
 
         self.learning_rate = self.hparams.get("lr", 1e-4)
-        self.patience = self.hparams.get("patience", 3)
+        self.patience = self.hparams.get("patience", 8)
         self.num_workers = self.hparams.get("num_workers", 0)
         self.batch_size = self.hparams.get("batch_size", 4)
 
@@ -115,15 +115,12 @@ class CloudModel(pl.LightningModule):
         dice_loss = smp.losses.DiceLoss(mode="multiclass", from_logits=True)(preds, y)
         loss = 0.5 * ce_loss + 0.5 * dice_loss
         self.log("train/loss", loss, on_step=True, on_epoch=True, prog_bar=True)
-
-        lr = self.trainer.optimizers[0].param_groups[0]['lr']
-        self.log("train/lr", lr, on_step=False, on_epoch=True, prog_bar=True)
-
+        
         if self.enable_bit_depth_adaptation and hasattr(self.model.encoder, 'get_bit_depth_info'):
             bd_info = self.model.encoder.get_bit_depth_info()
             if bd_info is not None:
                 self.log("train/est_bit_depth", bd_info['estimated'].mean(), on_step=True, on_epoch=True)
-
+        
         return loss
 
     def validation_step(self, batch: dict, batch_idx: int):
@@ -139,7 +136,7 @@ class CloudModel(pl.LightningModule):
         preds_class = torch.argmax(preds, dim=1)
         
         iou = intersection_over_union(preds_class, y)
-
+        
         self.log("val/iou", iou, on_step=True, on_epoch=True, prog_bar=True)
         
         if self.enable_bit_depth_adaptation and hasattr(self.model.encoder, 'get_bit_depth_info'):
@@ -148,6 +145,21 @@ class CloudModel(pl.LightningModule):
                 self.log("val/est_bit_depth", bd_info['estimated'].mean(), on_epoch=True)
         
         return iou
+
+    def on_validation_epoch_end(self):
+        if self.current_epoch == 4:
+            optimizer = self.trainer.optimizers[0]
+            scheduler_cosine = torch.optim.lr_scheduler.CosineAnnealingLR(
+                optimizer, T_max=70, eta_min=1e-7, last_epoch=-1
+            )
+            self.trainer.lr_schedulers = [{
+                "scheduler": scheduler_cosine,
+                "interval": "epoch",
+                "frequency": 1,
+                "strict": True,
+                "opt_idx": 0,
+            }]
+            self.log("train/lr_scheduler_switched", 1, on_epoch=True)
 
     def train_dataloader(self):
         loader_kwargs = {
@@ -171,8 +183,9 @@ class CloudModel(pl.LightningModule):
         return torch.utils.data.DataLoader(self.val_dataset, **loader_kwargs)
 
     def configure_optimizers(self):
+        encoder = self.model.encoder.base_encoder if self.enable_bit_depth_adaptation else self.model.encoder
         param_groups = [
-            {"params": self.model.encoder.base_encoder.parameters(), "lr": self.learning_rate * 0.5, "name": "encoder_base"},
+            {"params": encoder.parameters(), "lr": self.learning_rate * 0.5, "name": "encoder_base"},
             {"params": self.model.decoder.parameters(), "lr": self.learning_rate, "name": "decoder"},
             {"params": self.model.segmentation_head.parameters(), "lr": self.learning_rate, "name": "head"},
         ]
@@ -196,15 +209,14 @@ class CloudModel(pl.LightningModule):
                     })
         
         optimizer = torch.optim.AdamW(param_groups, weight_decay=1e-4)
-        
-        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-            optimizer, mode="max", factor=0.5, patience=self.patience, min_lr=1e-6
+
+        scheduler_plateau = torch.optim.lr_scheduler.ReduceLROnPlateau(
+            optimizer, mode="max", factor=0.5, patience=self.patience, min_lr=1e-5
         )
-        
         return {
             "optimizer": optimizer,
             "lr_scheduler": {
-                "scheduler": scheduler,
+                "scheduler": scheduler_plateau,
                 "monitor": "val/iou_epoch",
                 "interval": "epoch",
                 "frequency": 1,
@@ -216,7 +228,7 @@ class CloudModel(pl.LightningModule):
             model = smp.Unet(
                 encoder_name=self.backbone,
                 encoder_weights=self.weights,
-                # decoder_attention_type="scse",
+                decoder_attention_type="scse",
                 decoder_interpolation="bilinear",
                 in_channels=self.in_channels,
                 classes=self.num_classes,

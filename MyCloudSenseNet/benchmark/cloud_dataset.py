@@ -103,22 +103,24 @@ class CloudDataset(torch.utils.data.Dataset):
             band_arrs.append(band_arr)
         x_arr = np.stack(band_arrs, axis=-1)
 
-        # Apply data augmentations, if provided
-        if self.transforms:
-            x_arr = self.transforms(image=x_arr)["image"]
-        x_arr = np.transpose(x_arr, [2, 0, 1])
-
-        # Prepare dictionary for item
-        item = {"chip_id": str(img.chip_id), "chip": x_arr}
-
-        # Load label if available
+        y_arr = None
         if self.label is not None:
             label_path = self.label.loc[idx].label_path
             with rasterio.open(label_path) as lp:
                 y_arr = lp.read(1).astype("float32")
-            # Apply same data augmentations to the label
-            if self.transforms:
-                y_arr = self.transforms(image=y_arr)["image"]
+
+        if self.transforms:
+            if y_arr is None:
+                x_arr = self.transforms(image=x_arr)["image"]
+            else:
+                transformed = self.transforms(image=x_arr, mask=y_arr)
+                x_arr = transformed["image"]
+                y_arr = transformed["mask"]
+
+        x_arr = np.transpose(x_arr, [2, 0, 1])
+
+        item = {"chip_id": str(img.chip_id), "chip": x_arr}
+        if y_arr is not None:
             item["label"] = y_arr
 
         return item

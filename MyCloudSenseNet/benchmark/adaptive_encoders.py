@@ -4,8 +4,6 @@
 包含两种自适应编码器实现：
 1. BitDepthAdaptiveEncoder: 完整版，支持特征适配
 2. SimpleBitDepthAdaptiveEncoder: 简化版，只做位深度估计
-
-支持8-13位深度范围（6个类别）。
 """
 
 from typing import Optional, Dict
@@ -24,7 +22,6 @@ class BitDepthAdaptiveEncoder(nn.Module):
     组合B1+C3的自适应编码器（完整版）
     
     支持多种位深度估计器和特征适配器
-    支持8-13位深度范围（6个类别）
     """
     
     def __init__(

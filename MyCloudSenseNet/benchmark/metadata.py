@@ -469,26 +469,34 @@ def make_predictions(
         bands: List[str],
         predictions_dir: os.PathLike,
 ):
+    predictions_dir = Path(predictions_dir)
+    predictions_dir.mkdir(exist_ok=True, parents=True)
+    device_type = getattr(model, "device_type", "cpu")
+    if device_type in ("cuda", "mps"):
+        model = model.to(device_type)
+    model.eval()
+
     test_dataset = CloudDataset(x_paths=x_paths, bands=bands)
     test_dataloader = torch.utils.data.DataLoader(
         test_dataset,
         batch_size=model.batch_size,
         num_workers=model.num_workers,
         shuffle=False,
-        pin_memory=True,
+        pin_memory=device_type == "cuda",
     )
 
-    for batch_index, batch in enumerate(test_dataloader):
-        logger.debug(f"Predicting batch {batch_index} of {len(test_dataloader)}")
-        x = batch["chip"]
-        preds = model.forward(x)
-        # preds = torch.softmax(preds, dim=1)[:, 1]
-        # preds = (preds > 0.5).detach().numpy().astype("uint8")
-        preds = torch.argmax(preds, dim=1).detach().numpy().astype("uint8")
-        for chip_id, pred in zip(batch["chip_id"], preds):
-            chip_pred_path = predictions_dir / f"{chip_id}.tif"
-            chip_pred_im = Image.fromarray(pred)
-            chip_pred_im.save(chip_pred_path)
+    with torch.no_grad():
+        for batch_index, batch in enumerate(test_dataloader):
+            logger.debug(f"Predicting batch {batch_index} of {len(test_dataloader)}")
+            x = batch["chip"].to(device_type) if device_type in ("cuda", "mps") else batch["chip"]
+            preds = model.forward(x)
+            # preds = torch.softmax(preds, dim=1)[:, 1]
+            # preds = (preds > 0.5).detach().numpy().astype("uint8")
+            preds = torch.argmax(preds, dim=1).detach().cpu().numpy().astype("uint8")
+            for chip_id, pred in zip(batch["chip_id"], preds):
+                chip_pred_path = predictions_dir / f"{chip_id}.tif"
+                chip_pred_im = Image.fromarray(pred)
+                chip_pred_im.save(chip_pred_path)
 
 
 def main(
