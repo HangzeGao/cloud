@@ -12,9 +12,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from benchmark import pretty_print_dict
-from benchmark.bit_depth_estimators import BitDepthEstimatorFactory
-from benchmark.feature_adapters import FeatureAdapterFactory
+from benchmark.models.bit_depth_estimators import pretty_print_dict, BitDepthEstimatorFactory
+from benchmark.models.feature_adapters import FeatureAdapterFactory
 
 
 class BitDepthAdaptiveEncoder(nn.Module):

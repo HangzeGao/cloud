@@ -18,7 +18,7 @@ import rasterio
 from loguru import logger
 from tqdm import tqdm
 
-from benchmark.config import (
+from benchmark.core.config import (
     BANDS,
     CHIP_SIZE,
     OVERLAP_RATIO,
@@ -27,8 +27,9 @@ from benchmark.config import (
     DEFAULT_PREDICTOR,
     OUTPUT_DTYPE,
     NUM_CLASSES,
+    DEFAULT_TTA_MODES,
 )
-from benchmark.utils import (
+from benchmark.utils.utils import (
     ensure_dir,
     mask2label,
     is_label_valid,
@@ -36,7 +37,7 @@ from benchmark.utils import (
     display_thumbnail,
     calculate_bit_depth,
 )
-from benchmark.prediction import (
+from benchmark.core.prediction import (
     load_cloud_model,
     default_model_weights_path,
     save_prediction_geotiff,
@@ -44,9 +45,9 @@ from benchmark.prediction import (
     maybe_fast_dev,
     crop_prediction_to_shape,
     fuse_probability_scores,
+    save_chip_predictions,
 )
-from benchmark.config import DEFAULT_TTA_MODES
-from benchmark.cloud_model import CloudModel
+from benchmark.core.cloud_model import CloudModel
 
 
 @dataclass
@@ -707,8 +708,6 @@ class GeoTIFFTiler:
 
         logger.info("Loading model")
         model = load_cloud_model(default_model_weights_path())
-
-        from benchmark.prediction import save_chip_predictions
 
         x_paths = maybe_fast_dev(self.info.metadata, model, fast_dev_run)
         logger.info(f"Found {len(x_paths)} chips")

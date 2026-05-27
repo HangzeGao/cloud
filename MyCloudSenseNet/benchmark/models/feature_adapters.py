@@ -6,7 +6,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from benchmark import get_num_bit_depths, pretty_print_dict
+from benchmark.models.bit_depth_estimators import get_num_bit_depths, pretty_print_dict
 
 
 class FeatureAdapter(nn.Module):

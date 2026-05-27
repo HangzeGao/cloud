@@ -6,82 +6,93 @@ on satellite imagery.
 """
 
 __all__ = [
-    # Bit depth estimation
-    'get_bit_depth_range',
-    'get_num_bit_depths',
-    'get_bit_depth_values',
-    'get_bit_depth_tensor',
-    'pretty_print_dict',
-    # Data
-    'CloudDataset',
-    # Losses/Metrics
-    'intersection_over_union',
-    # Configuration
-    'BANDS',
-    'CHIP_SIZE',
-    'DEFAULT_TTA_MODES',
-    # TTA
-    'normalize_tta_modes',
-    'apply_tta',
-    'undo_tta',
-    'predict_with_tta',
-    # Evaluation
-    'intersection_over_union',
-    'read_prediction_and_aligned_true',
-    # Prediction
-    'load_cloud_model',
-    'predict_small_chips',
-    'save_prediction_geotiff',
-    'fuse_probability_scores',
-    # Metadata I/O
-    'load_chip_metadata',
-    'get_chip_metadata',
-    'save_chip_metadata',
-    # Tiling
-    'GeoTIFFTiler',
-    'ChipGenerator',
-    'ChipWriter',
-    # Visualization
-    'display_thumbnail_with_prediction',
+    # Core - Configuration
+    "BANDS",
+    "CHIP_SIZE",
+    "OVERLAP_RATIO",
+    "DATA_DIR",
+    "DEFAULT_TTA_MODES",
+    "NUM_CLASSES",
+    # Core - Dataset and Model
+    "CloudDataset",
+    "CloudModel",
+    # Core - Evaluation
+    "intersection_over_union",
+    "intersection_over_union_and_coverage",
+    "read_prediction_and_aligned_true",
+    # Core - Prediction
+    "load_cloud_model",
+    "predict_small_chips",
+    "fuse_probability_scores",
+    # Core - Metadata
+    "load_chip_metadata",
+    "get_chip_metadata",
+    # Core - Tiling
+    "GeoTIFFTiler",
+    "ChipGenerator",
+    "ChipWriter",
+    # Utils - TTA
+    "normalize_tta_modes",
+    "apply_tta",
+    "undo_tta",
+    "predict_with_tta",
+    # Utils - General
+    "ensure_dir",
+    "mask2label",
+    "stretch",
+    # Utils - Visualization
+    "display_thumbnail_with_prediction",
+    # Models
+    "AdaptiveEncoderFactory",
+    "get_bit_depth_range",
 ]
 
-# Bit depth estimation
-from benchmark.bit_depth_estimators import (
-    get_bit_depth_range,
-    get_num_bit_depths,
-    get_bit_depth_values,
-    get_bit_depth_tensor,
-    pretty_print_dict,
+# Core imports
+from benchmark.core.config import (
+    BANDS,
+    CHIP_SIZE,
+    OVERLAP_RATIO,
+    DATA_DIR,
+    DEFAULT_TTA_MODES,
+    NUM_CLASSES,
 )
-
-# Data
-from benchmark.cloud_dataset import CloudDataset
-
-# Losses/Metrics
-from benchmark.losses import intersection_over_union
-
-# Configuration
-from benchmark.config import BANDS, CHIP_SIZE, DEFAULT_TTA_MODES
-
-# TTA
-from benchmark.tta import normalize_tta_modes, apply_tta, undo_tta, predict_with_tta
-
-# Evaluation
-from benchmark.evaluation import intersection_over_union, read_prediction_and_aligned_true
-
-# Prediction
-from benchmark.prediction import (
+from benchmark.core.cloud_dataset import CloudDataset
+from benchmark.core.cloud_model import CloudModel
+from benchmark.core.evaluation import (
+    intersection_over_union,
+    intersection_over_union_and_coverage,
+    read_prediction_and_aligned_true,
+)
+from benchmark.core.prediction import (
     load_cloud_model,
     predict_small_chips,
-    save_prediction_geotiff,
     fuse_probability_scores,
 )
+from benchmark.core.metadata_io import (
+    load_chip_metadata,
+    get_chip_metadata,
+)
+from benchmark.core.tiler import (
+    GeoTIFFTiler,
+    ChipGenerator,
+    ChipWriter,
+)
 
-# Metadata I/O
-from benchmark.metadata_io import load_chip_metadata, get_chip_metadata, save_chip_metadata
+# Utils imports
+from benchmark.utils.tta import (
+    normalize_tta_modes,
+    apply_tta,
+    undo_tta,
+    predict_with_tta,
+)
+from benchmark.utils.utils import (
+    ensure_dir,
+    mask2label,
+    stretch,
+)
+# Visualization is imported separately to avoid circular imports
+# from benchmark.utils.visualization import ...
 
-# Tiling
-from benchmark.tiler import GeoTIFFTiler, ChipGenerator, ChipWriter
-
-# Visualization
-from benchmark.visualization import display_thumbnail_with_prediction
+# Models imports
+from benchmark.models.adaptive_encoders import AdaptiveEncoderFactory
+from benchmark.models.bit_depth_estimators import get_bit_depth_range

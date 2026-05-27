@@ -15,9 +15,9 @@ import torch.nn.functional as F
 from loguru import logger
 from tqdm import tqdm
 
-from benchmark.cloud_model import CloudModel
-from benchmark.cloud_dataset import CloudDataset
-from benchmark.config import (
+from benchmark.core.cloud_model import CloudModel
+from benchmark.core.cloud_dataset import CloudDataset
+from benchmark.core.config import (
     BANDS,
     DEFAULT_TTA_MODES,
     MODEL_NAME,
@@ -28,8 +28,8 @@ from benchmark.config import (
     DEFAULT_PREDICTOR,
     OUTPUT_DTYPE,
 )
-from benchmark.tta import predict_with_tta, normalize_tta_modes
-from benchmark.utils import ensure_dir, round_up
+from benchmark.utils.tta import predict_with_tta, normalize_tta_modes
+from benchmark.utils.utils import ensure_dir, round_up
 
 
 def default_model_weights_path(model_name: str = MODEL_NAME) -> Path:
@@ -342,7 +342,7 @@ def predict_small_chips(
     Returns:
         DataFrame with chip metadata
     """
-    from benchmark.metadata_io import load_chip_metadata
+    from benchmark.core.metadata_io import load_chip_metadata
 
     # Load metadata
     x_paths = load_chip_metadata(features, bands=bands)

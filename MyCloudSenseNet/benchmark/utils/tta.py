@@ -10,8 +10,8 @@ from typing import Optional, Sequence, Tuple
 import torch
 import torch.nn.functional as F
 
-from benchmark.config import DEFAULT_TTA_MODES, VALID_TTA_MODES
-from benchmark.cloud_model import CloudModel
+from benchmark.core.config import DEFAULT_TTA_MODES, VALID_TTA_MODES
+from benchmark.core.cloud_model import CloudModel
 
 
 def normalize_tta_modes(

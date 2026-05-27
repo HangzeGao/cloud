@@ -1,7 +1,8 @@
 from typing import Optional, List
 
-from benchmark import CloudDataset, intersection_over_union
-from benchmark.adaptive_encoders import AdaptiveEncoderFactory
+from benchmark.core.cloud_dataset import CloudDataset
+from benchmark.models.losses import intersection_over_union
+from benchmark.models.adaptive_encoders import AdaptiveEncoderFactory
 
 try:
     import albumentations as A

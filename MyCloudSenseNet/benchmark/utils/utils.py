@@ -13,7 +13,7 @@ from matplotlib import pyplot as plt
 from loguru import logger
 import rasterio
 
-from benchmark.config import (
+from benchmark.core.config import (
     STRETCH_PERCENTILE,
     THUMBNAIL_SIZE,
     LabelRanges,

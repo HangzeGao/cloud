@@ -11,7 +11,7 @@ from typing import List, Set
 import pandas as pd
 from loguru import logger
 
-from benchmark.config import BANDS
+from benchmark.core.config import BANDS
 
 
 def required_chip_columns(bands: List[str] = BANDS) -> Set[str]:
