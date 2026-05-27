@@ -24,6 +24,7 @@ VALID_THRESHOLD = [0.001, 0.999]
 DATA_DIR = Path.cwd().parent.resolve() / "data"
 MODEL_NAME = "unet"
 DEFAULT_TTA_MODES = ("none", "hflip", "vflip", "hvflip")
+PREDICTION_PAD_DIVISOR = 32
 
 
 def mask2label(mask):
@@ -122,6 +123,7 @@ def iter_chip_probability_batches(
         num_workers=model.num_workers,
         shuffle=False,
         pin_memory=device_type == "cuda",
+        collate_fn=pad_prediction_batch,
     )
 
     with torch.no_grad():
@@ -131,7 +133,31 @@ def iter_chip_probability_batches(
                 x = x.to(device_type)
 
             probs = predict_batch_probabilities(model, x, tta_modes=tta_modes)
-            yield batch["chip_id"], probs.detach().cpu().numpy()
+            yield batch["chip_id"], probs.detach().cpu().numpy(), batch["shape"]
+
+
+def round_up(value: int, divisor: int) -> int:
+    if divisor <= 1:
+        return value
+    return ((value + divisor - 1) // divisor) * divisor
+
+
+def pad_prediction_batch(batch: List[Dict[str, Any]]) -> Dict[str, Any]:
+    chips = [torch.as_tensor(item["chip"], dtype=torch.float32) for item in batch]
+    shapes = [(int(chip.shape[-2]), int(chip.shape[-1])) for chip in chips]
+    max_h = round_up(max(height for height, _ in shapes), PREDICTION_PAD_DIVISOR)
+    max_w = round_up(max(width for _, width in shapes), PREDICTION_PAD_DIVISOR)
+
+    padded_chips = []
+    for chip in chips:
+        height, width = chip.shape[-2], chip.shape[-1]
+        padded_chips.append(F.pad(chip, (0, max_w - width, 0, max_h - height)))
+
+    return {
+        "chip_id": [item["chip_id"] for item in batch],
+        "chip": torch.stack(padded_chips, dim=0),
+        "shape": shapes,
+    }
 
 
 def save_chip_predictions(
@@ -147,14 +173,101 @@ def save_chip_predictions(
     if save_probabilities:
         prob_out_dir.mkdir(exist_ok=True, parents=True)
 
-    for chip_ids, probs in iter_chip_probability_batches(model, x_paths, bands=bands, tta_modes=tta_modes):
+    for chip_ids, probs, shapes in iter_chip_probability_batches(model, x_paths, bands=bands, tta_modes=tta_modes):
         preds = np.argmax(probs, axis=1).astype("uint8")
-        for chip_id, pred, prob in zip(chip_ids, preds, probs):
+        for chip_id, pred, prob, shape in zip(chip_ids, preds, probs, shapes):
+            height, width = shape
+            pred = pred[:height, :width]
+            prob = prob[:, :height, :width]
             Image.fromarray(pred).save(pred_out_dir / f"{chip_id}.tif")
             if save_probabilities:
                 np.save(prob_out_dir / f"{chip_id}.npy", prob.astype("float16"))
 
     logger.info(f"""Saved {len(list(pred_out_dir.glob("*.tif")))} predictions""")
+
+
+def get_chip_metadata(features_dir: Path, bands: List[str] = BANDS) -> pd.DataFrame:
+    features_dir = Path(features_dir)
+    if not features_dir.exists():
+        raise ValueError(f"features_dir does not exist: {features_dir}")
+
+    rows = []
+    if all((features_dir / f"{band}.tif").exists() for band in bands):
+        rows.append({
+            "chip_id": features_dir.name,
+            **{f"{band}_path": str((features_dir / f"{band}.tif").resolve()) for band in bands},
+        })
+        return pd.DataFrame(rows)
+
+    chip_dirs = [path for path in features_dir.iterdir() if path.is_dir() and not path.name.startswith(".")]
+    for chip_dir in sorted(chip_dirs):
+        if not all((chip_dir / f"{band}.tif").exists() for band in bands):
+            logger.warning(f"Skipping {chip_dir.name}: missing one or more band files")
+            continue
+
+        row = {"chip_id": chip_dir.name}
+        for band in bands:
+            row[f"{band}_path"] = str((chip_dir / f"{band}.tif").resolve())
+        rows.append(row)
+
+    if not rows:
+        raise ValueError(
+            f"No valid chip folders found in {features_dir}. "
+            f"Expected either {', '.join(f'{band}.tif' for band in bands)} directly, "
+            "or subfolders containing those files."
+        )
+
+    return pd.DataFrame(rows)
+
+
+def load_chip_metadata(
+        features: Path | pd.DataFrame,
+        bands: List[str] = BANDS,
+) -> pd.DataFrame:
+    if isinstance(features, pd.DataFrame):
+        return features.copy()
+
+    features = Path(features)
+    if features.suffix.lower() == ".csv":
+        metadata = pd.read_csv(features)
+    else:
+        metadata = get_chip_metadata(features, bands=bands)
+
+    required_columns = {"chip_id", *(f"{band}_path" for band in bands)}
+    missing = required_columns - set(metadata.columns)
+    if missing:
+        raise ValueError(f"Chip metadata is missing required columns: {sorted(missing)}")
+
+    return metadata
+
+
+def predict_small_chips(
+        features: Path | pd.DataFrame,
+        pred_out_dir: Path,
+        model_weights_path: Path = Path(f"benchmark/{MODEL_NAME}/assets/cloud_model.pt"),
+        bands: List[str] = BANDS,
+        model_name: str = MODEL_NAME,
+        fast_dev_run: bool = False,
+        tta_modes: Optional[Sequence[str]] = DEFAULT_TTA_MODES,
+        save_probabilities: bool = False,
+) -> pd.DataFrame:
+    x_paths = load_chip_metadata(features, bands=bands)
+    model = load_cloud_model(model_weights_path, bands=bands, model_name=model_name)
+
+    if fast_dev_run:
+        x_paths = x_paths.head(max(model.batch_size, 1))
+
+    logger.info(f"Found {len(x_paths)} small chips")
+    logger.info("Generating small-chip predictions in batches")
+    save_chip_predictions(
+        model=model,
+        x_paths=x_paths,
+        pred_out_dir=Path(pred_out_dir),
+        bands=bands,
+        tta_modes=tta_modes,
+        save_probabilities=save_probabilities,
+    )
+    return x_paths
 
 
 class GeoTIFFTiler:
@@ -422,17 +535,20 @@ class GeoTIFFTiler:
 
         metadata_by_chip_id = x_paths.set_index("chip_id")
         logger.info("Generating TTA predictions and restoring chips to a large image")
-        for chip_ids, probs in tqdm(
+        for chip_ids, probs, shapes in tqdm(
                 iter_chip_probability_batches(model, x_paths, bands=BANDS, tta_modes=tta_modes),
                 total=math.ceil(len(x_paths) / max(model.batch_size, 1)),
                 desc="predicting/restoring",
         ):
             preds = np.argmax(probs, axis=1).astype("uint8")
-            for chip_id, pred, prob in zip(chip_ids, preds, probs):
+            for chip_id, pred, prob, shape in zip(chip_ids, preds, probs, shapes):
                 row = metadata_by_chip_id.loc[chip_id]
                 x1, y1 = int(row["x_start"]), int(row["y_start"])
                 x2, y2 = int(row["x_end"]), int(row["y_end"])
                 chip_h, chip_w = y2 - y1, x2 - x1
+                height, width = shape
+                pred = pred[:height, :width]
+                prob = prob[:, :height, :width]
 
                 prob_full[:, y1:y2, x1:x2] += prob[:, :chip_h, :chip_w]
                 weight_full[y1:y2, x1:x2] += 1
