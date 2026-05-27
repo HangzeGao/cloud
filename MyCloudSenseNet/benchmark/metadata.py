@@ -1,5 +1,4 @@
 import math
-from PIL import Image
 from matplotlib import pyplot as plt
 from tqdm import tqdm
 import pandas as pd
@@ -173,17 +172,37 @@ def save_chip_predictions(
     if save_probabilities:
         prob_out_dir.mkdir(exist_ok=True, parents=True)
 
+    metadata_by_chip_id = x_paths.set_index("chip_id")
     for chip_ids, probs, shapes in iter_chip_probability_batches(model, x_paths, bands=bands, tta_modes=tta_modes):
         preds = np.argmax(probs, axis=1).astype("uint8")
         for chip_id, pred, prob, shape in zip(chip_ids, preds, probs, shapes):
             height, width = shape
             pred = pred[:height, :width]
             prob = prob[:, :height, :width]
-            Image.fromarray(pred).save(pred_out_dir / f"{chip_id}.tif")
+            row = metadata_by_chip_id.loc[chip_id]
+            save_prediction_geotiff(pred, row[f"{bands[0]}_path"], pred_out_dir / f"{chip_id}.tif")
             if save_probabilities:
                 np.save(prob_out_dir / f"{chip_id}.npy", prob.astype("float16"))
 
     logger.info(f"""Saved {len(list(pred_out_dir.glob("*.tif")))} predictions""")
+
+
+def save_prediction_geotiff(pred: np.ndarray, reference_path: Path | str, output_path: Path) -> None:
+    with rasterio.open(reference_path) as src:
+        profile = src.profile.copy()
+
+    profile.update(
+        count=1,
+        dtype="uint8",
+        height=pred.shape[0],
+        width=pred.shape[1],
+        compress="deflate",
+        predictor=2,
+    )
+    profile.pop("nodata", None)
+
+    with rasterio.open(output_path, "w", **profile) as dst:
+        dst.write(pred.astype("uint8"), 1)
 
 
 def get_chip_metadata(features_dir: Path, bands: List[str] = BANDS) -> pd.DataFrame:
@@ -554,7 +573,7 @@ class GeoTIFFTiler:
                 weight_full[y1:y2, x1:x2] += 1
 
                 if save_chip_masks:
-                    Image.fromarray(pred).save(pred_label_dir / f"{chip_id}.tif")
+                    save_prediction_geotiff(pred, row[f"{BANDS[0]}_path"], pred_label_dir / f"{chip_id}.tif")
                 if save_probabilities:
                     np.save(prob_out_dir / f"{chip_id}.npy", prob.astype("float16"))
 
@@ -595,6 +614,12 @@ def intersection_over_union_and_coverage(pred, true, n_classes=3):
     Calculates intersection and union for a batch of images.
     Calculates coverage of each class for a batch of images.
     """
+    if pred.shape != true.shape:
+        raise ValueError(
+            f"pred and true must have the same shape, got pred={pred.shape}, true={true.shape}. "
+            "Use a chip prediction with the matching chip label, or use a restored full-image prediction."
+        )
+
     total_pixels = true.size
     valid_pixel_mask = (true != 255)  # valid pixel mask
     true = true[valid_pixel_mask]
@@ -628,11 +653,54 @@ def intersection_over_union_and_coverage(pred, true, n_classes=3):
 
     return mIoU, true_coverage_list, pred_coverage_list
 
+
+def read_prediction_and_aligned_true(data_path: Path, pred_path: Path) -> Tuple[np.ndarray, np.ndarray]:
+    with rasterio.open(data_path) as data_src, rasterio.open(pred_path) as pred_src:
+        pred = pred_src.read(1).astype(np.uint8)
+
+        if pred_src.height == data_src.height and pred_src.width == data_src.width:
+            true = mask2label(data_src.read(5).astype(np.uint8))
+            return pred, true
+
+        if pred_src.transform.is_identity:
+            raise ValueError(
+                f"Prediction {pred_path} is smaller than the full image but has no GeoTIFF transform. "
+                "Regenerate chip predictions with predict_small_chips()/GeoTIFFTiler.predict(), "
+                "or evaluate this prediction against its matching chip label_path."
+            )
+
+        if data_src.crs and pred_src.crs and data_src.crs != pred_src.crs:
+            raise ValueError(
+                f"Cannot align prediction to label because CRS differs: pred={pred_src.crs}, true={data_src.crs}"
+            )
+
+        try:
+            window = rasterio.windows.from_bounds(*pred_src.bounds, transform=data_src.transform)
+            true_mask = data_src.read(
+                5,
+                window=window,
+                out_shape=(pred_src.height, pred_src.width),
+                boundless=False,
+                resampling=rasterio.enums.Resampling.nearest,
+            ).astype(np.uint8)
+        except Exception as exc:
+            raise ValueError(
+                f"Prediction shape {pred.shape} does not match full label shape "
+                f"({data_src.height}, {data_src.width}), and automatic geospatial alignment failed. "
+                "For chip predictions, pass the matching chip label or save predictions with GeoTIFF transform."
+            ) from exc
+
+        true = mask2label(true_mask)
+        if pred.shape != true.shape:
+            raise ValueError(
+                f"Aligned true mask still does not match prediction: pred={pred.shape}, true={true.shape}"
+            )
+        return pred, true
+
+
 def display_thumbnail_more(data_path, pred_path=None, max_size=512):
     logger.info(f"Displaying thumbnail for {data_path.name}")
     with rasterio.open(data_path) as src:
-        true = mask2label(src.read(5).astype(np.uint8))
-
         h, w = src.height, src.width
         scale = min(max_size / w, max_size / h)
         new_w, new_h = int(w * scale), int(h * scale)
@@ -658,13 +726,13 @@ def display_thumbnail_more(data_path, pred_path=None, max_size=512):
     ax[1].set_title("True Mask Image")
 
     if pred_path:
+        pred, true_for_metric = read_prediction_and_aligned_true(data_path, pred_path)
         with rasterio.open(pred_path) as src2:
-            pred = src2.read(1).astype(np.uint8)
             pred_mask = src2.read(indexes=(1),
                                   out_shape=(src2.count, new_h, new_w),
                                   resampling=rasterio.enums.Resampling.bilinear).astype(np.uint8)
 
-        iou, true_cov, pred_cov = intersection_over_union_and_coverage(pred, true)
+        iou, true_cov, pred_cov = intersection_over_union_and_coverage(pred, true_for_metric)
 
         ax[1].set_title(f"True Mask Image\nshadow coverage={true_cov[0]:04f} | cloud coverage={true_cov[1]:04f} ")
         ax[2].imshow(pred_mask)
