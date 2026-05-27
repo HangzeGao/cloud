@@ -11,7 +11,7 @@ from benchmark.models.bit_depth_estimators import get_num_bit_depths, pretty_pri
 
 class FeatureAdapter(nn.Module):
     """
-    C3: 特征后处理适配层（原版）
+    特征后处理适配层（原版）
     
     在Backbone编码器输出特征后添加轻量适配，而非修改输入层
     优势：

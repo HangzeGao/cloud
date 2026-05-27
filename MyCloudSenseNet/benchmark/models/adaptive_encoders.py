@@ -1,9 +1,5 @@
 """
 位深度自适应编码器模块
-
-包含两种自适应编码器实现：
-1. BitDepthAdaptiveEncoder: 完整版，支持特征适配
-2. SimpleBitDepthAdaptiveEncoder: 简化版，只做位深度估计
 """
 
 from typing import Optional, Dict
@@ -18,7 +14,7 @@ from benchmark.models.feature_adapters import FeatureAdapterFactory
 
 class BitDepthAdaptiveEncoder(nn.Module):
     """
-    组合B1+C3的自适应编码器（完整版）
+    自适应编码器
     
     支持多种位深度估计器和特征适配器
     """

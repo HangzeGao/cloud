@@ -236,7 +236,7 @@ class CloudModel(pl.LightningModule):
             )
         elif model_name == "segformer":
             model = smp.Segformer(
-                encoder_name="mit_b3",
+                encoder_name=self.backbone,
                 encoder_weights=self.weights,
                 in_channels=self.in_channels,
                 classes=self.num_classes,
