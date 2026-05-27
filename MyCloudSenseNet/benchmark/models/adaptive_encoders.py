@@ -55,6 +55,28 @@ class BitDepthAdaptiveEncoder(nn.Module):
             feature_dim=feature_dim,
         )
 
+    @property
+    def out_channels(self):
+        """Expose SMP encoder metadata from the wrapped encoder."""
+        return self.base_encoder.out_channels
+
+    @property
+    def output_stride(self):
+        """Expose SMP encoder stride for input shape checks."""
+        return self.base_encoder.output_stride
+
+    def set_in_channels(self, in_channels, pretrained=True):
+        """Delegate SMP first-convolution patching to the wrapped encoder."""
+        return self.base_encoder.set_in_channels(in_channels, pretrained=pretrained)
+
+    def get_stages(self):
+        """Delegate stage metadata used by SMP dilation helpers."""
+        return self.base_encoder.get_stages()
+
+    def make_dilated(self, output_stride):
+        """Delegate dilation changes to the wrapped encoder."""
+        return self.base_encoder.make_dilated(output_stride)
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
         前向传播：先估计位深度，然后通过编码器，最后适配特征
