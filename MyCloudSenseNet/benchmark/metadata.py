@@ -126,9 +126,6 @@ def iter_chip_probability_batches(
 
     with torch.no_grad():
         for batch_index, batch in enumerate(dataloader):
-            if batch_index % 30 == 0:
-                logger.debug(f"Predicting batch {batch_index} of {len(dataloader)}")
-
             x = batch["chip"]
             if device_type in ("cuda", "mps"):
                 x = x.to(device_type)
