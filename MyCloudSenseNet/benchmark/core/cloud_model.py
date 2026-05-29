@@ -25,7 +25,7 @@ def get_device():
 
 class CloudModel(pl.LightningModule):
     """
-    云检测模型（使用B1+C3位深度自适应方案）
+    云判模型（使用位深度自适应方案）
     """
     
     def __init__(
