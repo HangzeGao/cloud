@@ -184,9 +184,9 @@ class CloudModel(pl.LightningModule):
         return torch.utils.data.DataLoader(self.val_dataset, **loader_kwargs)
 
     def configure_optimizers(self):
-        encoder = self.model.encoder.base_encoder if self.enable_bit_depth_adaptation else self.model.encoder
+        encoder = self.model.encoder.encoder if self.enable_bit_depth_adaptation else self.model.encoder
         param_groups = [
-            {"params": encoder.parameters(), "lr": self.learning_rate * 0.5, "name": "encoder_base"},
+            {"params": encoder.parameters(), "lr": self.learning_rate * 0.5, "name": "encoder"},
             {"params": self.model.decoder.parameters(), "lr": self.learning_rate, "name": "decoder"},
             {"params": self.model.segmentation_head.parameters(), "lr": self.learning_rate, "name": "head"},
         ]
@@ -254,7 +254,7 @@ class CloudModel(pl.LightningModule):
                     feature_dim = out_ch
             adaptive_encoder = AdaptiveEncoderFactory.create(
                 encoder_type=self.encoder_type,
-                base_encoder=model.encoder,
+                encoder=model.encoder,
                 in_channels=self.in_channels,
                 feature_dim=feature_dim,
                 estimator_type=self.estimator_type,

@@ -21,14 +21,14 @@ class BitDepthAdaptiveEncoder(nn.Module):
     
     def __init__(
         self, 
-        base_encoder: nn.Module, 
+        encoder: nn.Module,
         in_channels: int = 4, 
         feature_dim: int = None,
         estimator_type: str = 'conv',
         adapter_type: str = 'ultra_light',
     ):
         super().__init__()
-        self.base_encoder = base_encoder
+        self.encoder = encoder
         self.estimator_type = estimator_type
         self.adapter_type = adapter_type
 
@@ -40,8 +40,8 @@ class BitDepthAdaptiveEncoder(nn.Module):
         
         # 自动检测特征维度
         if feature_dim is None:
-            if hasattr(base_encoder, 'out_channels'):
-                out_ch = base_encoder.out_channels
+            if hasattr(encoder, 'out_channels'):
+                out_ch = encoder.out_channels
                 if isinstance(out_ch, (list, tuple)):
                     feature_dim = out_ch[-1]
                 else:
@@ -58,24 +58,24 @@ class BitDepthAdaptiveEncoder(nn.Module):
     @property
     def out_channels(self):
         """Expose SMP encoder metadata from the wrapped encoder."""
-        return self.base_encoder.out_channels
+        return self.encoder.out_channels
 
     @property
     def output_stride(self):
         """Expose SMP encoder stride for input shape checks."""
-        return self.base_encoder.output_stride
+        return self.encoder.output_stride
 
     def set_in_channels(self, in_channels, pretrained=True):
         """Delegate SMP first-convolution patching to the wrapped encoder."""
-        return self.base_encoder.set_in_channels(in_channels, pretrained=pretrained)
+        return self.encoder.set_in_channels(in_channels, pretrained=pretrained)
 
     def get_stages(self):
         """Delegate stage metadata used by SMP dilation helpers."""
-        return self.base_encoder.get_stages()
+        return self.encoder.get_stages()
 
     def make_dilated(self, output_stride):
         """Delegate dilation changes to the wrapped encoder."""
-        return self.base_encoder.make_dilated(output_stride)
+        return self.encoder.make_dilated(output_stride)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -88,7 +88,7 @@ class BitDepthAdaptiveEncoder(nn.Module):
             编码特征（经位深度适配，如果启用）
         """
         bit_depth_logits, estimated_bd = self.bit_depth_estimator(x)
-        features = self.base_encoder(x)
+        features = self.encoder(x)
         
         if self.feature_adapter is not None:
             if isinstance(features, (list, tuple)):
@@ -141,7 +141,7 @@ class AdaptiveEncoderFactory:
     @staticmethod
     def create(
             encoder_type: str,
-            base_encoder: nn.Module,
+            encoder: nn.Module,
             in_channels: int = 4,
             feature_dim: int = None,
             estimator_type: str = 'conv',
@@ -152,7 +152,7 @@ class AdaptiveEncoderFactory:
 
         Args:
             encoder_type: Key identifying the encoder configuration.
-            base_encoder: The base encoder module to wrap/adapt.
+            encoder: The encoder module to wrap/adapt.
             in_channels: Number of input channels.
             feature_dim: Dimension of features (optional).
             estimator_type: Type of estimator to use.
@@ -174,7 +174,7 @@ class AdaptiveEncoderFactory:
         encoder_class = AdaptiveEncoderFactory._ENCODER_CONFIGS[encoder_type]['class']
 
         return encoder_class(
-            base_encoder=base_encoder,
+            encoder=encoder,
             in_channels=in_channels,
             feature_dim=feature_dim,
             estimator_type=estimator_type,
