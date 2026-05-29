@@ -9,10 +9,9 @@ from typing import Tuple
 
 import numpy as np
 import rasterio
-from loguru import logger
 
+from benchmark.core.config import NUM_CLASSES, INVALID_LABEL_VALUE, logger
 from benchmark.utils.utils import mask2label
-from benchmark.core.config import NUM_CLASSES, INVALID_LABEL_VALUE
 
 
 def intersection_over_union_and_coverage(

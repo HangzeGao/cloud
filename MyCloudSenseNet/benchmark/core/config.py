@@ -4,8 +4,22 @@ Configuration module for cloud detection benchmark.
 This module contains all configuration constants used throughout the benchmark package.
 """
 
+import logging
+import sys
 from pathlib import Path
 from typing import Final, Sequence, Tuple
+
+# Setup logger - compatible with both loguru and standard logging
+try:
+    from loguru import logger
+except ImportError:
+    # Fallback to standard logging
+    logger = logging.getLogger("cloud_benchmark")
+    if not logger.handlers:
+        handler = logging.StreamHandler(sys.stdout)
+        handler.setFormatter(logging.Formatter("%(levelname)s: %(message)s"))
+        logger.addHandler(handler)
+        logger.setLevel(logging.INFO)
 
 # ---------------------------------------------------------------------------
 # Data Configuration
@@ -43,35 +57,6 @@ NUM_CLASSES: Final[int] = 3
 # ---------------------------------------------------------------------------
 # Prediction Configuration
 # ---------------------------------------------------------------------------
-
-# Default TTA (Test-Time Augmentation) modes.
-# D4 is the 8-element dihedral group of square symmetries:
-# identity, 90/180/270 rotations, horizontal/vertical reflections,
-# and the two diagonal reflections.
-DEFAULT_TTA_MODES: Final[Tuple[str, ...]] = (
-    "none",
-    "rot90",
-    "rot180",
-    "rot270",
-    "hflip",
-    "vflip",
-    "diag",
-    "anti_diag",
-)
-
-# Valid TTA modes for validation. "hvflip" is kept for backward compatibility
-# and is equivalent to rot180.
-VALID_TTA_MODES: Final[frozenset[str]] = frozenset({
-    "none",
-    "rot90",
-    "rot180",
-    "rot270",
-    "hflip",
-    "vflip",
-    "diag",
-    "anti_diag",
-    "hvflip",
-})
 
 # Padding divisor for prediction batching (should match model requirements)
 PREDICTION_PAD_DIVISOR: Final[int] = 32

@@ -1,0 +1,78 @@
+{
+  "_description": "快速训练配置 - 用于快速实验和调试",
+  "model_name": "unet",
+  "backbone": "timm-efficientnet-b0",
+  "encoder_weights": "imagenet",
+  "in_channels": 4,
+  "num_classes": 3,
+  "learning_rate": 0.0002,
+  "batch_size": 8,
+  "max_epochs": 20,
+  "bit_depth": {
+    "enabled": true,
+    "estimator_type": "minimal",
+    "adapter_type": "none",
+    "min_bit_depth": 8,
+    "max_bit_depth": 12,
+    "enable_multiscale_fusion": false,
+    "fusion_type": "attention",
+    "enable_spatial_spectral_attention": false,
+    "ssa_reduction": 8
+  },
+  "loss": {
+    "ce_weight": 1.0,
+    "dice_weight": 1.0,
+    "focal_weight": 0.0,
+    "enable_dynamic_weighting": false,
+    "enable_focal_loss": false,
+    "focal_alpha": 0.25,
+    "focal_gamma": 2.0,
+    "enable_boundary_loss": false,
+    "boundary_width": 5,
+    "boundary_weight": 2.0,
+    "enable_class_adaptive_weights": false
+  },
+  "training": {
+    "lr_scheduler_type": "one_cycle",
+    "warmup_epochs": 2,
+    "cosine_t_0": 10,
+    "cosine_t_mult": 2,
+    "eta_min": 1e-06,
+    "optimizer_type": "adamw",
+    "weight_decay": 0.0001,
+    "encoder_lr_scale": 0.5,
+    "bit_depth_component_lr_scale": 1.0,
+    "enable_deep_supervision": false,
+    "deep_supervision_weights": [0.4, 0.3, 0.2]
+  },
+  "inference": {
+    "enable_adaptive_tta": true,
+    "tta_confidence_threshold": 0.85,
+    "tta_light_modes": ["none", "rot180"],
+    "tta_full_modes": [
+      "none",
+      "rot90",
+      "rot180",
+      "rot270",
+      "hflip",
+      "vflip",
+      "diag",
+      "anti_diag"
+    ],
+    "enable_quantization": false,
+    "quantization_backend": "fbgemm",
+    "enable_pruning": false,
+    "pruning_amount": 0.3,
+    "enable_onnx_export": false,
+    "onnx_opset": 12
+  },
+  "data": {
+    "enable_disk_cache": true,
+    "cache_dir": null,
+    "max_memory_cache": 50,
+    "num_workers": 2,
+    "prefetch_factor": 2,
+    "persistent_workers": true,
+    "pin_memory": true
+  }
+}

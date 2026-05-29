@@ -15,7 +15,6 @@ from typing import Any, Dict, Iterator, List, Optional, Tuple
 import numpy as np
 import pandas as pd
 import rasterio
-from loguru import logger
 from tqdm import tqdm
 
 from benchmark.core.config import (
@@ -27,7 +26,8 @@ from benchmark.core.config import (
     DEFAULT_PREDICTOR,
     OUTPUT_DTYPE,
     NUM_CLASSES,
-    DEFAULT_TTA_MODES,
+    logger,
+    DEFAULT_MODEL_WEIGHTS_PATH,
 )
 from benchmark.utils.utils import (
     ensure_dir,
@@ -38,16 +38,13 @@ from benchmark.utils.utils import (
     calculate_bit_depth,
 )
 from benchmark.core.prediction import (
-    load_cloud_model,
-    default_model_weights_path,
-    save_prediction_geotiff,
-    iter_chip_probability_batches,
-    maybe_fast_dev,
-    crop_prediction_to_shape,
-    fuse_probability_scores,
-    save_chip_predictions,
+    load_model,
+    save_geotiff,
+    iter_predict,
+    crop,
+    fuse,
+    run,
 )
-from benchmark.core.cloud_model import CloudModel
 
 
 @dataclass
@@ -565,22 +562,16 @@ class GeoTIFFTiler:
     def predict(
         self,
         pred_out_dir: Path,
-        fast_dev_run: bool = False,
-        tta_modes: Tuple[str, ...] = DEFAULT_TTA_MODES,
-        save_chip_masks: bool = True,
+        save_chip_masks: bool = False,
         save_probabilities: bool = False,
-        fusion_method: str = "probability",
     ) -> Path:
         """
         Predict on all chips and fuse results into a full image.
 
         Args:
             pred_out_dir: Output directory for predictions
-            fast_dev_run: Whether to use fast development mode
-            tta_modes: TTA modes to use
             save_chip_masks: Whether to save individual chip masks
             save_probabilities: Whether to save probability arrays
-            fusion_method: Method for fusing overlapping predictions
 
         Returns:
             Path to the output prediction GeoTIFF
@@ -592,10 +583,10 @@ class GeoTIFFTiler:
             )
 
         logger.info("Loading model")
-        model = load_cloud_model(default_model_weights_path())
+        model = load_model(DEFAULT_MODEL_WEIGHTS_PATH)
 
         # Prepare for prediction
-        x_paths = maybe_fast_dev(self.info.metadata, model, fast_dev_run)
+        x_paths = self.info.metadata
         logger.info(f"Predicting on {len(x_paths)} chips")
 
         # Output directories
@@ -616,20 +607,18 @@ class GeoTIFFTiler:
 
         # Predict and accumulate
         logger.info("Predicting and fusing chips")
-        for chip_ids, probs, shapes in tqdm(
-            iter_chip_probability_batches(model, x_paths, tta_modes=tta_modes),
-            total=math.ceil(len(x_paths) / max(model.batch_size, 1)),
+        for chip_ids, preds, probs, shapes in tqdm(
+            iter_predict(model, x_paths),
+            total=math.ceil(len(x_paths) / max(model.config.batch_size, 1)),
             desc="Predicting",
         ):
-            preds = np.argmax(probs, axis=1).astype(np.uint8)
-
             for chip_id, pred, prob, shape in zip(chip_ids, preds, probs, shapes):
                 row = metadata_by_chip_id.loc[chip_id]
                 x1, y1 = int(row["x_start"]), int(row["y_start"])
                 x2, y2 = int(row["x_end"]), int(row["y_end"])
                 chip_h, chip_w = y2 - y1, x2 - x1
 
-                pred, prob = crop_prediction_to_shape(pred, prob, shape)
+                pred, prob = crop(pred, prob, shape)
 
                 # Accumulate probabilities
                 prob_full[:, y1:y2, x1:x2] += prob[:, :chip_h, :chip_w]
@@ -637,7 +626,7 @@ class GeoTIFFTiler:
 
                 # Save individual chip if requested
                 if save_chip_masks:
-                    save_prediction_geotiff(
+                    save_geotiff(
                         pred,
                         row[f"{BANDS[0]}_path"],
                         pred_label_dir / f"{chip_id}.tif",
@@ -647,7 +636,7 @@ class GeoTIFFTiler:
                     np.save(prob_out_dir / f"{chip_id}.npy", prob.astype("float16"))
 
         # Fuse and save
-        pred_full = fuse_probability_scores(prob_full, weight_full, fusion_method)
+        pred_full = fuse(prob_full, weight_full)
 
         output_path = pred_out_dir / f"{self.df_row.filename}_PredictedMask.tif"
         self._save_full_prediction(pred_full, output_path)
@@ -683,19 +672,13 @@ class GeoTIFFTiler:
 
     def predict_chips(
         self,
-        pred_out_dir: Path,
-        fast_dev_run: bool = False,
-        tta_modes: Tuple[str, ...] = DEFAULT_TTA_MODES,
-        save_probabilities: bool = False,
+        out_dir: Path,
     ) -> int:
         """
         Predict on chips and save individual predictions (no fusion).
 
         Args:
-            pred_out_dir: Output directory for predictions
-            fast_dev_run: Whether to use fast development mode
-            tta_modes: TTA modes to use
-            save_probabilities: Whether to save probability arrays
+            out_dir: Output directory for predictions
 
         Returns:
             Number of predictions saved
@@ -707,15 +690,13 @@ class GeoTIFFTiler:
             )
 
         logger.info("Loading model")
-        model = load_cloud_model(default_model_weights_path())
+        model = load_model(DEFAULT_MODEL_WEIGHTS_PATH)
 
-        x_paths = maybe_fast_dev(self.info.metadata, model, fast_dev_run)
+        x_paths = self.info.metadata
         logger.info(f"Found {len(x_paths)} chips")
 
-        return save_chip_predictions(
+        return run(
             model=model,
             x_paths=x_paths,
-            pred_out_dir=pred_out_dir,
-            tta_modes=tta_modes,
-            save_probabilities=save_probabilities,
+            output_dir=out_dir,
         )

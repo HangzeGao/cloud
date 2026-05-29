@@ -1,8 +1,7 @@
 """
-Prediction module for cloud detection.
+Prediction module for cloud detection - v2.0
 
-This module handles model loading, batch prediction, and result saving for both
-small chips and large image tiles.
+推理模块 - 支持新架构模型和自适应TTA
 """
 
 from pathlib import Path
@@ -12,116 +11,121 @@ import numpy as np
 import pandas as pd
 import torch
 import torch.nn.functional as F
-from loguru import logger
 from tqdm import tqdm
 
 from benchmark.core.cloud_model import CloudModel
 from benchmark.core.cloud_dataset import CloudDataset
+from benchmark.models.architecture_config import ModelConfig, Configs
 from benchmark.core.config import (
     BANDS,
-    DEFAULT_TTA_MODES,
-    MODEL_NAME,
     NUM_CLASSES,
     PREDICTION_PAD_DIVISOR,
     PROBABILITY_DTYPE,
     DEFAULT_COMPRESSION,
     DEFAULT_PREDICTOR,
     OUTPUT_DTYPE,
+    logger,
 )
-from benchmark.utils.tta import predict_with_tta, normalize_tta_modes
+from benchmark.utils.tta import predict_with_tta
 from benchmark.utils.utils import ensure_dir, round_up
 
 
-def default_model_weights_path(model_name: str = MODEL_NAME) -> Path:
-    """
-    Get the default path for model weights.
-
-    Args:
-        model_name: Model architecture name
-
-    Returns:
-        Path to model weights file
-    """
-    return Path(f"benchmark/{model_name}/assets/cloud_model.pt")
-
-
-def load_cloud_model(
+def load_model(
     model_weights_path: Path,
     bands: List[str] = BANDS,
-    model_name: str = MODEL_NAME,
+    config: Optional[ModelConfig] = None,
+    device: str = "auto",
 ) -> CloudModel:
     """
-    Load a cloud detection model from weights.
+    加载云检测模型
 
     Args:
-        model_weights_path: Path to model weights file
-        bands: List of band names
-        model_name: Model architecture name
+        model_weights_path: 模型权重路径
+        bands: 波段列表
+        config: 模型配置（默认使用 balanced）
+        device: 设备 ('cuda', 'mps', 'cpu', 'auto')
 
     Returns:
-        Loaded CloudModel in eval mode
+        加载好的模型（eval模式）
     """
     logger.info(f"Loading model from {model_weights_path}")
 
+    if config is None:
+        config = Configs.balanced()
+
     model = CloudModel(
         bands=bands,
-        hparams={"weights": None},
-        model_name=model_name,
+        config=config,
+        x_train=None,
+        y_train=None,
+        x_val=None,
+        y_val=None,
     )
 
-    # Determine device for loading
-    device_type = getattr(model, "device_type", "cpu")
-    map_location = (
-        torch.device(device_type)
-        if device_type in ("cuda", "mps")
-        else torch.device("cpu")
-    )
+    if device == "auto":
+        device = model.device_type
 
-    # Load state dict
-    state_dict = torch.load(model_weights_path, map_location=map_location)
-    model.load_state_dict(state_dict)
+    map_location = torch.device(device) if device in ("cuda", "mps") else torch.device("cpu")
+    checkpoint = torch.load(model_weights_path, map_location=map_location)
+
+    if isinstance(checkpoint, dict) and "state_dict" in checkpoint:
+        model.load_state_dict(checkpoint["state_dict"])
+    else:
+        model.load_state_dict(checkpoint)
+
     model.eval()
+    model = model.to(device)
 
+    logger.info(f"Model loaded on {device}")
     return model
 
 
-def maybe_fast_dev(
-    metadata: pd.DataFrame,
+def predict(
     model: CloudModel,
-    fast_dev_run: bool,
-) -> pd.DataFrame:
+    x: torch.Tensor,
+    use_tta: bool = True,
+    tta_strategy: str = "adaptive",
+) -> Tuple[torch.Tensor, Dict[str, Any]]:
     """
-    Limit metadata to a small subset for fast development runs.
+    单样本/批次预测
 
     Args:
-        metadata: Chip metadata DataFrame
-        model: CloudModel (used to get batch_size)
-        fast_dev_run: Whether to enable fast development mode
+        model: CloudModel
+        x: 输入 [B, C, H, W]
+        use_tta: 是否使用TTA
+        tta_strategy: TTA策略
 
     Returns:
-        Potentially truncated metadata DataFrame
+        (probabilities, info)
     """
-    if not fast_dev_run:
-        return metadata
-    return metadata.head(max(model.batch_size, 1))
+    model.eval()
+
+    with torch.no_grad():
+        x = x.to(model.device_type)
+
+        probs, info = predict_with_tta(
+            model=lambda img: model(img),
+            x=x,
+            tta_strategy=tta_strategy if use_tta else "none",
+        )
+
+    return probs, info
 
 
-def pad_prediction_batch(
+def pad_batch(
     batch: List[Dict[str, Any]],
     pad_divisor: int = PREDICTION_PAD_DIVISOR,
 ) -> Dict[str, Any]:
     """
-    Pad a batch of chips to consistent size for batch prediction.
+    将批次填充到统一尺寸
 
     Args:
-        batch: List of chip dictionaries with 'chip' and 'chip_id' keys
-        pad_divisor: Divisor to round up to (for model requirements)
+        batch: 批次列表
+        pad_divisor: 填充除数
 
     Returns:
-        Dictionary with padded batch tensor and metadata
+        填充后的批次字典
     """
-    import rasterio
-
     chips = [torch.as_tensor(item["chip"], dtype=torch.float32) for item in batch]
     shapes = [(int(chip.shape[-2]), int(chip.shape[-1])) for chip in chips]
 
@@ -140,88 +144,84 @@ def pad_prediction_batch(
     }
 
 
-def build_prediction_dataloader(
+def build_dataloader(
     model: CloudModel,
     x_paths: pd.DataFrame,
     bands: List[str],
-    device_type: str,
+    batch_size: Optional[int] = None,
 ) -> torch.utils.data.DataLoader:
     """
-    Build a DataLoader for prediction.
+    构建推理数据加载器
 
     Args:
-        model: CloudModel with batch_size and num_workers attributes
-        x_paths: DataFrame with chip paths
-        bands: List of band names
-        device_type: Device type ('cuda', 'mps', or 'cpu')
+        model: CloudModel
+        x_paths: 数据路径DataFrame
+        bands: 波段列表
+        batch_size: 批次大小（默认使用模型配置）
 
     Returns:
-        Configured DataLoader
+        DataLoader
     """
     dataset = CloudDataset(x_paths=x_paths.reset_index(drop=True), bands=bands)
 
+    if batch_size is None:
+        batch_size = model.config.batch_size
+
     return torch.utils.data.DataLoader(
         dataset,
-        batch_size=model.batch_size,
-        num_workers=model.num_workers,
+        batch_size=batch_size,
+        num_workers=0,
         shuffle=False,
-        pin_memory=device_type == "cuda",
-        collate_fn=pad_prediction_batch,
+        pin_memory=model.gpu,
+        collate_fn=pad_batch,
     )
 
 
-def iter_chip_probability_batches(
+def iter_predict(
     model: CloudModel,
     x_paths: pd.DataFrame,
     bands: List[str] = BANDS,
-    tta_modes: Optional[Sequence[str]] = DEFAULT_TTA_MODES,
+    use_tta: bool = True,
+    tta_strategy: str = "adaptive",
 ):
     """
-    Iterate over chip batches and yield probability predictions.
+    迭代预测批次
 
     Args:
-        model: CloudModel for prediction
-        x_paths: DataFrame with chip metadata
-        bands: List of band names
-        tta_modes: TTA modes to use
+        model: CloudModel
+        x_paths: 数据路径
+        bands: 波段列表
+        use_tta: 是否使用TTA
+        tta_strategy: TTA策略
 
     Yields:
-        Tuples of (chip_ids, probabilities, shapes) where:
-        - chip_ids: List of chip IDs
-        - probabilities: NumPy array of shape (B, num_classes, H, W)
-        - shapes: List of (H, W) tuples for original chip sizes
+        (chip_ids, predictions, probabilities, shapes)
     """
-    device_type = getattr(model, "device_type", "cpu")
-
-    # Move model to device
-    if device_type in ("cuda", "mps"):
-        model = model.to(device_type)
-
-    dataloader = build_prediction_dataloader(model, x_paths, bands, device_type)
+    dataloader = build_dataloader(model, x_paths, bands)
 
     with torch.no_grad():
-        for batch in dataloader:
-            x = batch["chip"]
-            if device_type in ("cuda", "mps"):
-                x = x.to(device_type)
+        for batch in tqdm(dataloader, desc="Predicting"):
+            x = batch["chip"].to(model.device_type)
 
-            probs = predict_with_tta(model, x, tta_modes=tta_modes)
+            probs, info = predict(model, x, use_tta=use_tta, tta_strategy=tta_strategy)
+            probs_np = probs.cpu().numpy()
+            preds = np.argmax(probs_np, axis=1).astype(np.uint8)
 
-            yield batch["chip_id"], probs.detach().cpu().numpy(), batch["shape"]
+            yield batch["chip_id"], preds, probs_np, batch["shape"]
 
 
-def save_prediction_geotiff(
+def save_geotiff(
     pred: np.ndarray,
     reference_path: Path,
     output_path: Path,
 ) -> None:
     """
-    Save a prediction as a GeoTIFF with geographic metadata.
+    保存预测结果为GeoTIFF
 
     Args:
-        pred: Prediction array (H, W) with class labels
-        reference_path: Path to reference image for metadata
-        output_path: Output path for prediction GeoTIFF
+        pred: 预测数组 [H, W]
+        reference_path: 参考图像路径（用于地理信息）
+        output_path: 输出路径
     """
     import rasterio
 
@@ -242,158 +242,118 @@ def save_prediction_geotiff(
         dst.write(pred.astype(np.uint8), 1)
 
 
-def crop_prediction_to_shape(
+def crop(
     pred: np.ndarray,
     prob: np.ndarray,
     shape: Tuple[int, int],
 ) -> Tuple[np.ndarray, np.ndarray]:
     """
-    Crop prediction and probability to original chip shape.
+    裁剪到原始尺寸
 
     Args:
-        pred: Prediction array (H, W)
-        prob: Probability array (num_classes, H, W)
-        shape: Original (height, width) of the chip
+        pred: 预测 [H, W]
+        prob: 概率 [C, H, W]
+        shape: 目标尺寸 (h, w)
 
     Returns:
-        Tuple of (cropped_pred, cropped_prob)
+        (cropped_pred, cropped_prob)
     """
-    height, width = shape
-    return pred[:height, :width], prob[:, :height, :width]
+    h, w = shape
+    return pred[:h, :w], prob[:, :h, :w]
 
 
-def save_chip_predictions(
+def fuse(
+    prob_full: np.ndarray,
+    weight_full: np.ndarray,
+) -> np.ndarray:
+    """
+    融合重叠区域的概率
+
+    Args:
+        prob_full: 累积概率 [C, H, W]
+        weight_full: 权重 [H, W]
+
+    Returns:
+        融合后的标签 [H, W]
+    """
+    weight_full = np.maximum(weight_full, 1)
+    normalized = prob_full / weight_full[None, :, :]
+    return np.argmax(normalized, axis=0).astype(np.uint8)
+
+
+def run(
     model: CloudModel,
     x_paths: pd.DataFrame,
-    pred_out_dir: Path,
+    output_dir: Path,
     bands: List[str] = BANDS,
-    tta_modes: Optional[Sequence[str]] = DEFAULT_TTA_MODES,
-    save_probabilities: bool = False,
+    use_tta: bool = True,
+    tta_strategy: str = "adaptive",
+    save_probs: bool = False,
 ) -> int:
     """
-    Save predictions for all chips in x_paths.
+    运行推理并保存结果
 
     Args:
-        model: CloudModel for prediction
-        x_paths: DataFrame with chip metadata
-        pred_out_dir: Output directory for predictions
-        bands: List of band names
-        tta_modes: TTA modes to use
-        save_probabilities: Whether to save probability arrays as .npy files
+        model: CloudModel
+        x_paths: 输入数据路径
+        output_dir: 输出目录
+        bands: 波段列表
+        use_tta: 是否使用TTA
+        tta_strategy: TTA策略
+        save_probs: 是否保存概率文件
 
     Returns:
-        Number of predictions saved
+        预测数量
     """
-    ensure_dir(pred_out_dir)
+    ensure_dir(output_dir)
 
-    prob_out_dir = pred_out_dir / "probabilities"
-    if save_probabilities:
-        ensure_dir(prob_out_dir)
+    if save_probs:
+        prob_dir = output_dir / "probabilities"
+        ensure_dir(prob_dir)
 
-    metadata_by_chip_id = x_paths.set_index("chip_id")
+    metadata = x_paths.set_index("chip_id")
     count = 0
 
-    for chip_ids, probs, shapes in iter_chip_probability_batches(
-        model, x_paths, bands=bands, tta_modes=tta_modes
+    for chip_ids, preds, probs, shapes in iter_predict(
+        model, x_paths, bands=bands, use_tta=use_tta, tta_strategy=tta_strategy
     ):
-        preds = np.argmax(probs, axis=1).astype(np.uint8)
-
         for chip_id, pred, prob, shape in zip(chip_ids, preds, probs, shapes):
-            pred, prob = crop_prediction_to_shape(pred, prob, shape)
-            row = metadata_by_chip_id.loc[chip_id]
+            pred, prob = crop(pred, prob, shape)
 
-            # Save prediction GeoTIFF
+            row = metadata.loc[chip_id]
             ref_path = row[f"{bands[0]}_path"]
-            save_prediction_geotiff(pred, ref_path, pred_out_dir / f"{chip_id}.tif")
+            save_geotiff(pred, ref_path, output_dir / f"{chip_id}.tif")
 
-            # Save probability if requested
-            if save_probabilities:
-                np.save(prob_out_dir / f"{chip_id}.npy", prob.astype(PROBABILITY_DTYPE))
+            if save_probs:
+                np.save(prob_dir / f"{chip_id}.npy", prob.astype(PROBABILITY_DTYPE))
 
             count += 1
 
-    logger.info(f"Saved {count} predictions to {pred_out_dir}")
+    logger.info(f"Saved {count} predictions to {output_dir}")
     return count
 
 
-def predict_small_chips(
-    features: Path | pd.DataFrame,
-    pred_out_dir: Path,
-    model_weights_path: Path,
+def simple(
+    model_path: Path,
+    input_paths: pd.DataFrame,
+    output_dir: Path,
+    config: Optional[ModelConfig] = None,
     bands: List[str] = BANDS,
-    model_name: str = MODEL_NAME,
-    fast_dev_run: bool = False,
-    tta_modes: Optional[Sequence[str]] = DEFAULT_TTA_MODES,
-    save_probabilities: bool = False,
-) -> pd.DataFrame:
+    use_tta: bool = True,
+) -> int:
     """
-    Predict on small pre-chipped images.
+    简单推理接口 - 一键预测
 
     Args:
-        features: Path to features directory or CSV, or DataFrame
-        pred_out_dir: Output directory for predictions
-        model_weights_path: Path to model weights
-        bands: List of band names
-        model_name: Model architecture name
-        fast_dev_run: Whether to use fast development mode
-        tta_modes: TTA modes to use
-        save_probabilities: Whether to save probability arrays
+        model_path: 模型权重路径
+        input_paths: 输入数据路径
+        output_dir: 输出目录
+        config: 模型配置（默认balanced）
+        bands: 波段列表
+        use_tta: 是否使用TTA
 
     Returns:
-        DataFrame with chip metadata
+        预测数量
     """
-    from benchmark.core.metadata_io import load_chip_metadata
-
-    # Load metadata
-    x_paths = load_chip_metadata(features, bands=bands)
-
-    # Load model
-    model = load_cloud_model(model_weights_path, bands=bands, model_name=model_name)
-
-    # Fast dev mode
-    x_paths = maybe_fast_dev(x_paths, model, fast_dev_run)
-
-    logger.info(f"Found {len(x_paths)} small chips")
-    logger.info("Generating small-chip predictions in batches")
-
-    # Run prediction
-    save_chip_predictions(
-        model=model,
-        x_paths=x_paths,
-        pred_out_dir=Path(pred_out_dir),
-        bands=bands,
-        tta_modes=tta_modes,
-        save_probabilities=save_probabilities,
-    )
-
-    return x_paths
-
-
-def fuse_probability_scores(
-    prob_full: np.ndarray,
-    weight_full: np.ndarray,
-    fusion_method: str = "probability",
-) -> np.ndarray:
-    """
-    Fuse overlapping probability predictions.
-
-    Args:
-        prob_full: Accumulated probability scores (num_classes, H, W)
-        weight_full: Accumulated weights for normalization (H, W)
-        fusion_method: Fusion method name (only "probability" supported)
-
-    Returns:
-        Fused prediction labels (H, W)
-
-    Raises:
-        ValueError: If fusion_method is not supported
-    """
-    if fusion_method != "probability":
-        raise ValueError(f"fusion_method must be 'probability', got {fusion_method}")
-
-    # Avoid division by zero
-    weight_full = np.maximum(weight_full, 1)
-
-    # Normalize probabilities and get argmax
-    normalized_probs = prob_full / weight_full[None, :, :]
-    return np.argmax(normalized_probs, axis=0).astype(np.uint8)
+    model = load_model(model_path, bands=bands, config=config)
+    return run(model, input_paths, output_dir, bands=bands, use_tta=use_tta)

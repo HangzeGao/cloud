@@ -10,13 +10,13 @@ from typing import Any, Dict, Tuple
 
 import numpy as np
 from matplotlib import pyplot as plt
-from loguru import logger
 import rasterio
 
 from benchmark.core.config import (
     STRETCH_PERCENTILE,
     THUMBNAIL_SIZE,
     LabelRanges,
+    logger,
 )
 
 
