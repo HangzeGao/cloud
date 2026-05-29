@@ -29,6 +29,8 @@ def normalize_tta_modes(
     Raises:
         ValueError: If unknown TTA modes are specified
     """
+    if tta_modes is None:
+        return DEFAULT_TTA_MODES
     if not tta_modes:
         return ("none",)
 
@@ -53,7 +55,10 @@ def apply_tta(image: torch.Tensor, mode: str) -> torch.Tensor:
 
     Args:
         image: Input image tensor with shape (..., H, W)
-        mode: TTA mode name ('hflip', 'vflip', 'hvflip', or 'none')
+        mode: TTA mode name. Defaults use D4 modes:
+            'none', 'rot90', 'rot180', 'rot270',
+            'hflip', 'vflip', 'diag', 'anti_diag'.
+            'hvflip' is also accepted for backward compatibility.
 
     Returns:
         Transformed image tensor
@@ -62,8 +67,16 @@ def apply_tta(image: torch.Tensor, mode: str) -> torch.Tensor:
         return torch.flip(image, dims=(-1,))
     if mode == "vflip":
         return torch.flip(image, dims=(-2,))
-    if mode == "hvflip":
+    if mode in {"hvflip", "rot180"}:
         return torch.flip(image, dims=(-2, -1))
+    if mode == "rot90":
+        return torch.rot90(image, k=1, dims=(-2, -1))
+    if mode == "rot270":
+        return torch.rot90(image, k=3, dims=(-2, -1))
+    if mode == "diag":
+        return image.transpose(-2, -1)
+    if mode == "anti_diag":
+        return torch.flip(image.transpose(-2, -1), dims=(-2, -1))
     return image
 
 
@@ -71,7 +84,8 @@ def undo_tta(pred: torch.Tensor, mode: str) -> torch.Tensor:
     """
     Undo TTA transformation from prediction tensor.
 
-    Note: For flips, applying the same operation undoes it.
+    Note: Most D4 transforms are self-inverse. 90 and 270 degree rotations
+    undo each other.
 
     Args:
         pred: Prediction tensor with shape (..., H, W)
@@ -80,6 +94,10 @@ def undo_tta(pred: torch.Tensor, mode: str) -> torch.Tensor:
     Returns:
         Untransformed prediction tensor
     """
+    if mode == "rot90":
+        return torch.rot90(pred, k=3, dims=(-2, -1))
+    if mode == "rot270":
+        return torch.rot90(pred, k=1, dims=(-2, -1))
     return apply_tta(pred, mode)
 
 

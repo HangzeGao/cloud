@@ -44,15 +44,34 @@ NUM_CLASSES: Final[int] = 3
 # Prediction Configuration
 # ---------------------------------------------------------------------------
 
-# Default TTA (Test-Time Augmentation) modes
-# "none": no augmentation
-# "hflip": horizontal flip
-# "vflip": vertical flip
-# "hvflip": both horizontal and vertical flip
-DEFAULT_TTA_MODES: Final[Tuple[str, ...]] = ("none", "hflip", "vflip", "hvflip")
+# Default TTA (Test-Time Augmentation) modes.
+# D4 is the 8-element dihedral group of square symmetries:
+# identity, 90/180/270 rotations, horizontal/vertical reflections,
+# and the two diagonal reflections.
+DEFAULT_TTA_MODES: Final[Tuple[str, ...]] = (
+    "none",
+    "rot90",
+    "rot180",
+    "rot270",
+    "hflip",
+    "vflip",
+    "diag",
+    "anti_diag",
+)
 
-# Valid TTA modes for validation
-VALID_TTA_MODES: Final[frozenset[str]] = frozenset({"none", "hflip", "vflip", "hvflip"})
+# Valid TTA modes for validation. "hvflip" is kept for backward compatibility
+# and is equivalent to rot180.
+VALID_TTA_MODES: Final[frozenset[str]] = frozenset({
+    "none",
+    "rot90",
+    "rot180",
+    "rot270",
+    "hflip",
+    "vflip",
+    "diag",
+    "anti_diag",
+    "hvflip",
+})
 
 # Padding divisor for prediction batching (should match model requirements)
 PREDICTION_PAD_DIVISOR: Final[int] = 32

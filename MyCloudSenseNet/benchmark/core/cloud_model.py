@@ -59,7 +59,7 @@ class CloudModel(pl.LightningModule):
         self.weights = self.hparams.get("weights", "imagenet")
 
         self.learning_rate = self.hparams.get("lr", 1e-4)
-        self.patience = self.hparams.get("patience", 8)
+        self.patience = self.hparams.get("patience", 3)
         self.num_workers = self.hparams.get("num_workers", 0)
         self.batch_size = self.hparams.get("batch_size", 4)
 
@@ -270,8 +270,9 @@ class CloudModel(pl.LightningModule):
     def _create_transforms(self):
         if A:
             transforms = [
-                A.HorizontalFlip(p=0.5),
-                A.VerticalFlip(p=0.5),
+                A.D4(p=0.5)
+                # A.HorizontalFlip(p=0.5),
+                # A.VerticalFlip(p=0.5),
             ]
             return A.Compose(transforms)
         else:
