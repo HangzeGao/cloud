@@ -68,8 +68,8 @@ class BitDepthAdapter(nn.Module):
         return features + 0.1 * transformed
 
 
-class UltraLightAdapter(nn.Module):
-    """超轻量适配器"""
+class HardGateBitDepthAdapter(nn.Module):
+    """基于离散位深度类别的硬门控适配器。"""
     
     def __init__(self, feature_dim: int, num_bit_depths: int = 5):
         super().__init__()
@@ -94,16 +94,39 @@ class UltraLightAdapter(nn.Module):
         return features + 0.1 * adapted
 
 
+class LightBitDepthAdapter(nn.Module):
+    """低参数量位深度缩放适配器。"""
+
+    def __init__(self, feature_dim: int, num_bit_depths: int = 5):
+        super().__init__()
+        self.feature_dim = feature_dim
+        self.bit_depth_scale = nn.Embedding(num_bit_depths, feature_dim)
+        self.bit_depth_bias = nn.Embedding(num_bit_depths, feature_dim)
+        nn.init.zeros_(self.bit_depth_scale.weight)
+        nn.init.zeros_(self.bit_depth_bias.weight)
+
+    def forward(self, features, bit_depth_logits):
+        idx = bit_depth_logits.argmax(dim=1)
+        scale = torch.sigmoid(self.bit_depth_scale(idx)).view(features.size(0), -1, 1, 1)
+        bias = self.bit_depth_bias(idx).view(features.size(0), -1, 1, 1)
+        return features + 0.1 * (features * scale + bias)
+
+
 class AdapterFactory:
     """适配器工厂"""
     
     @staticmethod
     def create(adapter_type: str, feature_dim: int, num_bit_depths: int = 5):
+        adapter_type = {
+            "feature_adapter": "hard_gate",
+            "multiscale_light": "hard_gate",
+        }.get(adapter_type, adapter_type)
         adapters = {
-            "original": BitDepthAdapter,
-            "ultra_light": UltraLightAdapter,
-            "multiscale_light": BitDepthAdapter,  # 默认使用标准版
+            "default": BitDepthAdapter,
+            "hard_gate": HardGateBitDepthAdapter,
+            "light": LightBitDepthAdapter,
         }
         if adapter_type not in adapters:
-            raise ValueError(f"Unknown adapter: {adapter_type}")
+            valid = ", ".join(sorted(adapters))
+            raise ValueError(f"Unknown adapter: {adapter_type}. Valid adapters: {valid}")
         return adapters[adapter_type](feature_dim, num_bit_depths)

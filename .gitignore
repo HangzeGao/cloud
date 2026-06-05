@@ -24,6 +24,8 @@ experiments/
 experiments_*/
 checkpoints/
 lightning_logs/
+segformer/
+unet/
 *.pt
 *.pth
 *.ckpt

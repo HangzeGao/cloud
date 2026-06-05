@@ -6,11 +6,12 @@ reading from directories and CSV files.
 """
 
 from pathlib import Path
-from typing import List, Set
+from typing import Iterable, List, Mapping, Sequence, Set
 
 import pandas as pd
 
-from benchmark.core.config import BANDS, logger
+from ..configs.defaults import BANDS, NUM_CLASSES, logger
+from .raster_utils import label_class_stats
 
 
 def required_chip_columns(bands: List[str] = BANDS) -> Set[str]:
@@ -211,6 +212,197 @@ def filter_valid_chips(
     return metadata[valid_mask].copy()
 
 
+def label_distribution_columns(num_classes: int = NUM_CLASSES) -> list[str]:
+    """Return the standard label-distribution columns stored in metadata."""
+    columns = ["dominant_label_class", "label_non_background_ratio"]
+    for class_id in range(num_classes):
+        columns.append(f"label_class_{class_id}_ratio")
+    return columns
+
+
+def enrich_label_distribution_from_paths(
+    metadata: pd.DataFrame,
+    label_column: str = "label_path",
+    num_classes: int = NUM_CLASSES,
+) -> pd.DataFrame:
+    """Add per-class label ratios by reading each label GeoTIFF."""
+    if label_column not in metadata.columns:
+        raise ValueError(f"Label column '{label_column}' not found")
+
+    import rasterio
+
+    rows = []
+    for _, row in metadata.iterrows():
+        label_path = Path(row[label_column])
+        if not label_path.exists():
+            raise FileNotFoundError(f"Label file not found: {label_path}")
+
+        with rasterio.open(label_path) as src:
+            label = src.read(1)
+        rows.append(label_class_stats(label, num_classes=num_classes))
+
+    distribution = pd.DataFrame(rows, index=metadata.index)
+    return pd.concat(
+        [
+            metadata.drop(
+                columns=[c for c in distribution.columns if c in metadata.columns],
+                errors="ignore",
+            ),
+            distribution,
+        ],
+        axis=1,
+    )
+
+
+def summarize_label_distribution(
+    metadata: pd.DataFrame,
+    num_classes: int = NUM_CLASSES,
+) -> pd.DataFrame:
+    """Summarize mean chip-level class ratios from metadata."""
+    required = [f"label_class_{class_id}_ratio" for class_id in range(num_classes)]
+    missing = [col for col in required if col not in metadata.columns]
+    if missing:
+        raise ValueError(
+            "Metadata is missing label distribution columns. "
+            f"Missing: {missing}. Run enrich_label_distribution_from_paths() first."
+        )
+
+    rows = []
+    for class_id in range(num_classes):
+        ratio_col = f"label_class_{class_id}_ratio"
+        rows.append({
+            "class_id": class_id,
+            "mean_chip_ratio": float(metadata[ratio_col].mean()) if len(metadata) else 0.0,
+            "dominant_chip_count": int(
+                (metadata.get("dominant_label_class") == class_id).sum()
+            )
+            if "dominant_label_class" in metadata.columns
+            else 0,
+        })
+    return pd.DataFrame(rows)
+
+
+def plan_label_distribution(
+    metadata: pd.DataFrame,
+    ratio_column: str = "label_non_background_ratio",
+    bins: Sequence[float] = (-0.01, 0.0, 0.01, 0.05, 0.2, 0.5, 0.8, 0.95, 1.0),
+    group_columns: Iterable[str] = ("dominant_label_class",),
+) -> pd.DataFrame:
+    """
+    Build a chip-count planning table by label-ratio bins and optional groups.
+
+    This is useful before train/validation splitting: inspect which bins/classes
+    are underrepresented and sample from each group deliberately.
+    """
+    if ratio_column not in metadata.columns:
+        raise ValueError(
+            f"Metadata is missing '{ratio_column}'. "
+            "Run enrich_label_distribution_from_paths() first if needed."
+        )
+
+    planned = add_label_ratio_bins(metadata, ratio_column=ratio_column, bins=bins)
+    group_columns = [col for col in group_columns if col in planned.columns]
+
+    grouping = [*group_columns, "label_ratio_bin"]
+    summary = (
+        planned.groupby(grouping, observed=True)
+        .size()
+        .rename("chip_count")
+        .reset_index()
+    )
+    summary["chip_ratio"] = summary["chip_count"] / max(len(planned), 1)
+    return summary.sort_values(grouping).reset_index(drop=True)
+
+
+def add_label_ratio_bins(
+    metadata: pd.DataFrame,
+    ratio_column: str = "label_non_background_ratio",
+    bins: Sequence[float] = (-0.01, 0.0, 0.01, 0.05, 0.2, 0.5, 0.8, 0.95, 1.0),
+    bin_column: str = "label_ratio_bin",
+) -> pd.DataFrame:
+    """Return metadata with a categorical bin column for a label ratio."""
+    if ratio_column not in metadata.columns:
+        raise ValueError(
+            f"Metadata is missing '{ratio_column}'. "
+            "Run enrich_label_distribution_from_paths() first if needed."
+        )
+
+    planned = metadata.copy()
+    planned[bin_column] = pd.cut(
+        planned[ratio_column],
+        bins=list(bins),
+        include_lowest=True,
+        duplicates="drop",
+    )
+    return planned
+
+
+def sample_train_metadata_by_label_bins(
+    metadata: pd.DataFrame,
+    keep_ratio: float | Mapping[str, float] = 1.0,
+    ratio_column: str = "label_non_background_ratio",
+    bins: Sequence[float] = (-0.01, 0.0, 0.01, 0.05, 0.2, 0.5, 0.8, 0.95, 1.0),
+    group_columns: Iterable[str] = ("dominant_label_class",),
+    random_state: int = 42,
+    min_per_group: int = 0,
+    drop_bin_column: bool = True,
+) -> pd.DataFrame:
+    """
+    Sample chips from each label-ratio bin/group to build a new train metadata.
+
+    Args:
+        metadata: Chip metadata with label ratio columns.
+        keep_ratio: Either one global ratio, or a mapping keyed by bin string.
+            Use keys like ``"(-0.001, 0.01]"`` from plan_label_distribution().
+            A ``"default"`` key is used when a bin-specific ratio is absent.
+        ratio_column: Ratio column used for binning.
+        bins: Bin edges.
+        group_columns: Optional grouping columns in addition to the ratio bin.
+        random_state: Random seed for reproducible sampling.
+        min_per_group: Minimum chips to keep from each non-empty group.
+        drop_bin_column: Remove the helper ``label_ratio_bin`` column before return.
+
+    Returns:
+        A sampled train metadata DataFrame.
+    """
+    planned = add_label_ratio_bins(metadata, ratio_column=ratio_column, bins=bins)
+    group_columns = [col for col in group_columns if col in planned.columns]
+    grouping = [*group_columns, "label_ratio_bin"]
+
+    if not grouping:
+        grouping = ["label_ratio_bin"]
+
+    def ratio_for_group(group: pd.DataFrame) -> float:
+        if isinstance(keep_ratio, Mapping):
+            bin_key = str(group["label_ratio_bin"].iloc[0])
+            ratio = keep_ratio.get(bin_key, keep_ratio.get("default", 1.0))
+        else:
+            ratio = keep_ratio
+        if not 0 <= ratio <= 1:
+            raise ValueError(f"keep_ratio must be in [0, 1], got {ratio}")
+        return float(ratio)
+
+    sampled_groups = []
+    for _, group in planned.groupby(grouping, observed=True):
+        ratio = ratio_for_group(group)
+        sample_size = int(round(len(group) * ratio))
+        if ratio > 0 and min_per_group > 0:
+            sample_size = max(sample_size, min(min_per_group, len(group)))
+        sample_size = min(sample_size, len(group))
+        if sample_size == 0:
+            continue
+        sampled_groups.append(group.sample(n=sample_size, random_state=random_state))
+
+    if sampled_groups:
+        sampled = pd.concat(sampled_groups, ignore_index=True)
+    else:
+        sampled = planned.iloc[0:0].copy()
+
+    if drop_bin_column and "label_ratio_bin" in sampled.columns:
+        sampled = sampled.drop(columns=["label_ratio_bin"])
+    return sampled.reset_index(drop=True)
+
+
 def get_chip_statistics(metadata: pd.DataFrame) -> dict:
     """
     Get statistics about chip metadata.
@@ -235,5 +427,14 @@ def get_chip_statistics(metadata: pd.DataFrame) -> dict:
         existing = metadata[col].apply(lambda x: Path(x).exists()).sum()
         stats[f"{col}_existing"] = int(existing)
         stats[f"{col}_missing"] = len(metadata) - int(existing)
+
+    distribution_cols = [
+        col for col in metadata.columns
+        if (
+            col.startswith("label_class_") and col.endswith("_ratio")
+        ) or col == "label_non_background_ratio"
+    ]
+    if distribution_cols:
+        stats["label_distribution_columns"] = distribution_cols
 
     return stats
