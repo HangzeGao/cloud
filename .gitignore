@@ -1,0 +1,46 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+dist/
+build/
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Model checkpoints and logs
+experiments/
+experiments_*/
+checkpoints/
+lightning_logs/
+segformer/
+unet/
+*.pt
+*.pth
+*.ckpt
+
+# Data (large files)
+data/
+*.jpg
+*.png
+*.tif
+
+# Logs
+*.log
+tensorboard/
+.cursor/
+
+# OS
+.DS_Store
+Thumbs.db
