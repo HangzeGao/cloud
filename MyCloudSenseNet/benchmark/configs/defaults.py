@@ -111,4 +111,4 @@ STRETCH_PERCENTILE: Final[int] = 2
 # ---------------------------------------------------------------------------
 
 # Default number of workers for parallel processing
-DEFAULT_MAX_WORKERS: Final[int] = 4
+DEFAULT_MAX_WORKERS: Final[int] = 32

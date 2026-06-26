@@ -104,7 +104,7 @@ class CloudModel(pl.LightningModule):
     ):
         super().__init__()
         
-        self.config = config if isinstance(config, ModelConfig) else ModelConfig(**config)
+        self.config = config # if isinstance(config, ModelConfig) else ModelConfig(**config)
         self.save_hyperparameters({"config": self.config.to_dict()})
         self.bands = self.config.bands
         self.in_channels = self.config.in_channels
