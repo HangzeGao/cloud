@@ -13,7 +13,7 @@ Author: CloudSenseNet Team
 Version: 2.0
 """
 
-from typing import Any, Dict
+from typing import Any, Dict, Tuple
 
 import pytorch_lightning as pl
 import segmentation_models_pytorch as smp
@@ -125,6 +125,7 @@ class CloudModel(pl.LightningModule):
         # cache outputs
         self.validation_step_outputs = []
         self.test_step_outputs = []
+        self._test_images_logged = 0
     
     def _get_loss_kwargs(self) -> Dict[str, Any]:
         """获取损失函数配置参数"""
@@ -259,7 +260,11 @@ class CloudModel(pl.LightningModule):
         
         return loss
     
-    def _eval_step(self, batch: Dict[str, Any], stage: str):
+    def _eval_step(
+        self,
+        batch: Dict[str, Any],
+        stage: str,
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """Run a labeled evaluation step for validation or test."""
         if "label" not in batch:
             raise ValueError(f"{stage} evaluation requires y paths/labels in the dataset.")
@@ -273,19 +278,103 @@ class CloudModel(pl.LightningModule):
             iou = intersection_over_union(preds, y)
         
         self.log(f"{stage}/iou", iou, on_step=False, on_epoch=True, prog_bar=True)
-        return iou
+        return iou, x, y, preds
 
     def validation_step(self, batch: Dict[str, Any], batch_idx: int):
         """验证步骤"""
-        iou = self._eval_step(batch, "val")
+        iou, _, _, _ = self._eval_step(batch, "val")
         self.validation_step_outputs.append(iou)
         return iou
 
     def test_step(self, batch: Dict[str, Any], batch_idx: int):
         """测试步骤"""
-        iou = self._eval_step(batch, "test")
+        iou, x, y, preds = self._eval_step(batch, "test")
+        self._log_test_images(batch, x, y, preds)
         self.test_step_outputs.append(iou)
         return iou
+
+    def on_test_start(self):
+        """Reset the TensorBoard test-image budget for each test run."""
+        self._test_images_logged = 0
+
+    def _log_test_images(
+        self,
+        batch: Dict[str, Any],
+        x: torch.Tensor,
+        targets: torch.Tensor,
+        predictions: torch.Tensor,
+    ) -> None:
+        """Log a bounded set of test inputs, labels, and predictions to TensorBoard."""
+        max_samples = self.config.test_image_log_max_samples
+        if (
+            not self.config.log_test_images
+            or max_samples == 0
+            or self.global_rank != 0
+            or self._test_images_logged >= max_samples
+        ):
+            return
+
+        experiment = getattr(self.logger, "experiment", None)
+        if experiment is None or not hasattr(experiment, "add_images"):
+            return
+
+        count = min(x.size(0), max_samples - self._test_images_logged)
+        experiment.add_images(
+            "test/input",
+            self._make_rgb_preview(x[:count]),
+            self.global_step,
+            dataformats="NCHW",
+        )
+        experiment.add_images(
+            "test/target",
+            self._colorize_mask(targets[:count]),
+            self.global_step,
+            dataformats="NCHW",
+        )
+        experiment.add_images(
+            "test/prediction",
+            self._colorize_mask(predictions[:count]),
+            self.global_step,
+            dataformats="NCHW",
+        )
+        if "chip_id" in batch and hasattr(experiment, "add_text"):
+            chip_ids = ", ".join(str(chip_id) for chip_id in batch["chip_id"][:count])
+            experiment.add_text("test/chip_ids", chip_ids, self.global_step)
+
+        self._test_images_logged += count
+
+    def _make_rgb_preview(self, images: torch.Tensor) -> torch.Tensor:
+        """Create a normalized RGB preview, preferring B04/B03/B02 bands."""
+        band_indices = [
+            self.bands.index(band)
+            for band in ("B04", "B03", "B02")
+            if band in self.bands
+        ]
+        if len(band_indices) < 3:
+            band_indices = list(range(min(3, images.size(1))))
+        while len(band_indices) < 3:
+            band_indices.append(band_indices[-1])
+
+        rgb = images[:, band_indices].detach().float().cpu()
+        channel_min = rgb.amin(dim=(-2, -1), keepdim=True)
+        channel_max = rgb.amax(dim=(-2, -1), keepdim=True)
+        return (rgb - channel_min) / (channel_max - channel_min).clamp_min(1e-6)
+
+    def _colorize_mask(self, mask: torch.Tensor) -> torch.Tensor:
+        """Convert class-index masks to RGB images for TensorBoard."""
+        palette = torch.tensor(
+            [
+                [0.10, 0.10, 0.10],
+                [0.95, 0.63, 0.12],
+                [0.12, 0.65, 0.95],
+                [0.86, 0.28, 0.28],
+                [0.45, 0.80, 0.31],
+                [0.72, 0.42, 0.88],
+            ],
+            dtype=torch.float32,
+        )
+        class_indices = mask.detach().long().cpu().clamp_(0, len(palette) - 1)
+        return palette[class_indices].permute(0, 3, 1, 2)
     
     def on_validation_epoch_end(self):
         """验证 epoch 结束"""

@@ -23,10 +23,10 @@ class ModelConfig:
     num_classes: int = 3
     
     # 训练参数
-    learning_rate: float = 1e-4
-    batch_size: int = 4
+    learning_rate: float = 1e-3
+    batch_size: int = 25
     max_epochs: int = 100
-    num_workers: int = 0
+    num_workers: int = 8
     warmup_epochs: int = 5
     
     # 优化器参数
@@ -55,6 +55,10 @@ class ModelConfig:
     tta_strategy: str = "light"  # none, adaptive, light, standard
     tta_threshold: float = 0.9
 
+    # TensorBoard test visualization
+    log_test_images: bool = True
+    test_image_log_max_samples: int = 8
+
     def __post_init__(self):
         self.validate()
 
@@ -72,6 +76,8 @@ class ModelConfig:
             raise ValueError("max_epochs must be >= 1")
         if self.learning_rate <= 0:
             raise ValueError("learning_rate must be > 0")
+        if self.test_image_log_max_samples < 0:
+            raise ValueError("test_image_log_max_samples must be >= 0")
 
     @property
     def in_channels(self) -> int:
