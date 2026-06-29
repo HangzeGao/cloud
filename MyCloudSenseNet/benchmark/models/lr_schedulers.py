@@ -177,7 +177,7 @@ class LRSchedulerFactory:
         optimizer: Optimizer,
         num_epochs: int,
         warmup_epochs: int = 5,
-        eta_min: float = 1e-6,
+        eta_min: float = 1e-5,
         **kwargs,
     ) -> Union[_LRScheduler, Dict[str, Any]]:
         if scheduler_type == "plateau":
@@ -187,7 +187,6 @@ class LRSchedulerFactory:
                 factor=kwargs.get("factor", 0.5),
                 patience=kwargs.get("patience", 3),
                 min_lr=eta_min,
-                verbose=kwargs.get("verbose", True),
             )
             return {
                 "scheduler": scheduler,

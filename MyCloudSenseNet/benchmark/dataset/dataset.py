@@ -92,8 +92,8 @@ class CloudDataset(torch.utils.data.Dataset):
         for band in self.bands:
             with rasterio.open(img[f"{band}_path"]) as b:
                 band_arr = b.read(1).astype("float32")
-                # band_arr = normalize_by_bit_depth(band_arr, self.bit_depth)
-                band_arr = normalize_by_minmax(band_arr)
+                band_arr = normalize_by_bit_depth(band_arr, self.bit_depth)
+                # band_arr = normalize_by_minmax(band_arr)
             band_arrs.append(band_arr)
         x_arr = np.stack(band_arrs, axis=-1)
 

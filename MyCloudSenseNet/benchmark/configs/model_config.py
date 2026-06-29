@@ -24,10 +24,9 @@ class ModelConfig:
     
     # 训练参数
     learning_rate: float = 1e-3
-    batch_size: int = 25
+    batch_size: int = 24
     max_epochs: int = 100
-    num_workers: int = 8
-    warmup_epochs: int = 5
+    num_workers: int = 16
     
     # 优化器参数
     encoder_lr_scale: float = 0.5
@@ -36,6 +35,7 @@ class ModelConfig:
     
     # 学习率调度
     lr_scheduler_type: str = "cosine_warmup"  # plateau, cosine, cosine_warmup, one_cycle
+    warmup_epochs: int = max_epochs // 10
     
     # 位深度自适应
     bit_depth_enabled: bool = True
@@ -57,7 +57,7 @@ class ModelConfig:
 
     # TensorBoard test visualization
     log_test_images: bool = True
-    test_image_log_max_samples: int = 8
+    test_image_log_max_samples: int = 64
 
     def __post_init__(self):
         self.validate()
