@@ -15,24 +15,62 @@ def normalize_by_minmax(data, max_pixel=1):
     data *= max_pixel
     return data
 
-def normalize_by_bit_depth(data, input_bit_depth: int = 10, target_range: tuple = (0, 1)):
+
+def estimate_bit_depth_from_range(
+    data,
+    min_bit_depth: int = 1,
+    max_bit_depth: Optional[int] = None,
+) -> int:
+    """Estimate bit depth from finite input values."""
+    data = np.asarray(data)
+    finite_data = data[np.isfinite(data)]
+    if finite_data.size == 0:
+        return min_bit_depth
+
+    data_min = float(finite_data.min())
+    data_max = float(finite_data.max())
+    if data_max <= 0:
+        return min_bit_depth
+
+    if data_min < 0:
+        data_max = data_max - data_min
+
+    bit_depth = int(np.ceil(np.log2(data_max + 1)))
+    bit_depth = max(bit_depth, min_bit_depth)
+    if max_bit_depth is not None:
+        bit_depth = min(bit_depth, max_bit_depth)
+    return bit_depth
+
+
+def normalize_by_bit_depth(
+    data,
+    input_bit_depth: Optional[int] = None,
+    target_range: tuple = (0, 1),
+    clip: bool = True,
+):
     """
-    基于固定位深度的归一化
-    保留绝对辐射强度信息，适用于跨位深度迁移
+    基于位深度的归一化。
+    当 input_bit_depth 为 None 时，根据输入数据范围自动估计位深度。
 
     Args:
         data: 输入数据
-        input_bit_depth: 输入数据的位深度 (GF1=10)
+        input_bit_depth: 输入数据的位深度；为 None 时自动估计
         target_range: 归一化目标范围，默认(0, 1)
+        clip: 是否将结果裁剪到 target_range
 
     Returns:
         归一化后的数据
     """
-    max_val = 2 ** input_bit_depth - 1  # 10-bit: 1023
-    normalized = data.astype("float32") / max_val
+    if input_bit_depth is None:
+        input_bit_depth = estimate_bit_depth_from_range(data)
+
+    source_max = 2 ** input_bit_depth - 1
+    normalized = data.astype("float32") / source_max
 
     min_val, max_val = target_range
     normalized = normalized * (max_val - min_val) + min_val
+    if clip:
+        normalized = np.clip(normalized, min_val, max_val)
 
     return normalized
 
@@ -70,7 +108,7 @@ class CloudDataset(torch.utils.data.Dataset):
         x_paths: pd.DataFrame,
         bands: List[str],
         y_paths: Optional[pd.DataFrame] = None,
-        bit_depth: Optional[int] = 10,
+        bit_depth: Optional[int] = None,
         transforms: Optional = None,
     ):
         """
