@@ -149,7 +149,8 @@ class CloudDataset(torch.utils.data.Dataset):
                 x_arr = transformed["image"]
                 y_arr = transformed["mask"]
 
-        x_arr = np.transpose(x_arr, [2, 0, 1])
+        if isinstance(x_arr, np.ndarray):
+            x_arr = np.transpose(x_arr, [2, 0, 1])
 
         item = {"chip_id": str(img.chip_id), "chip": x_arr}
         if y_arr is not None:

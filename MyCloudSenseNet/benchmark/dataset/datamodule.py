@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Optional
+from typing import Optional, Sequence
 
 import pandas as pd
 import pytorch_lightning as pl
@@ -11,18 +11,50 @@ import torch
 from ..configs import ModelConfig
 from .dataset import CloudDataset
 
+try:
+    import albumentations as A
+    from albumentations.pytorch import ToTensorV2
+except ImportError:
+    A = None
+    ToTensorV2 = None
+
 
 def create_train_transforms():
-    """Create training augmentations when albumentations is installed."""
-    try:
-        import albumentations as A
-    except ImportError:
+    """Create stochastic training augmentations when albumentations is installed."""
+    if A is None or ToTensorV2 is None:
         return None
+
     return A.Compose(
         [
             A.D4(p=1),
-            # A.HorizontalFlip(p=0.5),
-            # A.VerticalFlip(p=0.5),
+            A.ColorJitter(
+                brightness=0.2,
+                contrast=0.2,
+                p=0.5,
+            ),
+            A.Normalize(
+                mean=[0.485, 0.456, 0.406, 0.0],
+                std=[0.229, 0.224, 0.225, 1.0],
+                max_pixel_value=1.0
+            ),
+            ToTensorV2(),
+        ]
+    )
+
+
+def create_val_transforms():
+    """Create deterministic evaluation preprocessing when albumentations is installed."""
+    if A is None or ToTensorV2 is None:
+        return None
+
+    return A.Compose(
+        [
+            A.Normalize(
+                mean=[0.485, 0.456, 0.406, 0.0],
+                std=[0.229, 0.224, 0.225, 1.0],
+                max_pixel_value=1.0
+            ),
+            ToTensorV2(),
         ]
     )
 
@@ -66,7 +98,7 @@ class CloudDataModule(pl.LightningDataModule):
                 x_paths=self.x_val,
                 bands=self.config.bands,
                 y_paths=self.y_val,
-                transforms=None,
+                transforms=create_val_transforms(),
             )
 
         if self.x_test is not None:

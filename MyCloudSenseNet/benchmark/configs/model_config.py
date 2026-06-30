@@ -16,7 +16,7 @@ class ModelConfig:
     """
     
     # 模型架构
-    model_name: str = "unet"  # unet, segformer, deeplabv3+
+    model_name: str = "segformer"  # unet, segformer, deeplabv3+
     backbone: str = "timm-efficientnet-b0"
     encoder_weights: str = "imagenet"
     bands: list[str] = field(default_factory=lambda: ["B02", "B03", "B04", "B08"])
@@ -24,7 +24,7 @@ class ModelConfig:
     
     # 训练参数
     learning_rate: float = 1e-3
-    batch_size: int = 24
+    batch_size: int = 32
     max_epochs: int = 100
     num_workers: int = 16
     
