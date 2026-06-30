@@ -16,8 +16,8 @@ class ModelConfig:
     """
     
     # 模型架构
-    model_name: str = "segformer"  # unet, segformer, deeplabv3+
-    backbone: str = "timm-efficientnet-b0"
+    model_name: str = "fpn"  # unet, segformer, deeplabv3+, fpn
+    backbone: str = "mit_b0" # mit_b0 ~ mit_b5 / resnet34, resnet50 / timm-efficientnet-b0 ~ timm-efficientnet-b7
     encoder_weights: str = "imagenet"
     bands: list[str] = field(default_factory=lambda: ["B02", "B03", "B04", "B08"])
     num_classes: int = 3
@@ -64,7 +64,7 @@ class ModelConfig:
 
     def validate(self) -> None:
         """Validate config values early so failures are explicit."""
-        if self.model_name not in {"unet", "segformer", "deeplabv3+"}:
+        if self.model_name not in {"unet", "segformer", "deeplabv3+", "fpn"}:
             raise ValueError(f"Unsupported model_name: {self.model_name}")
         if not self.bands:
             raise ValueError("bands must contain at least one spectral band")

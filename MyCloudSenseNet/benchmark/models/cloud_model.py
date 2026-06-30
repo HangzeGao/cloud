@@ -170,6 +170,14 @@ class CloudModel(pl.LightningModule):
                 in_channels=self.in_channels,
                 classes=self.num_classes,
             )
+        elif cfg.model_name == "fpn":
+            model = smp.FPN(
+            encoder_name=cfg.backbone,
+            encoder_weights=cfg.encoder_weights,
+            decoder_merge_policy="cat",   # 特征融合方式：add（轻量）或 cat（信息更丰富）
+            in_channels=self.in_channels,
+            classes=self.num_classes,
+        )
         else:
             raise ValueError(f"Unknown model: {cfg.model_name}")
         
