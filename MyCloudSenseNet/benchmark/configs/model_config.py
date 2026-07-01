@@ -17,14 +17,14 @@ class ModelConfig:
     
     # 模型架构
     model_name: str = "fpn"  # unet, segformer, deeplabv3+, fpn
-    backbone: str = "mit_b0" # mit_b0 ~ mit_b5 / resnet34, resnet50 / timm-efficientnet-b0 ~ timm-efficientnet-b7
+    backbone: str = "mit_b3" # mit_b0 ~ mit_b5 / resnet34, resnet50 / timm-efficientnet-b0 ~ timm-efficientnet-b7
     encoder_weights: str = "imagenet"
-    bands: list[str] = field(default_factory=lambda: ["B02", "B03", "B04", "B08"])
+    bands: list[str] = field(default_factory=lambda: ["B02", "B03", "B04"])
     num_classes: int = 3
     
     # 训练参数
     learning_rate: float = 1e-3
-    batch_size: int = 32
+    batch_size: int = 16
     max_epochs: int = 100
     num_workers: int = 16
     
@@ -49,6 +49,9 @@ class ModelConfig:
     loss_boundary: bool = True
     loss_boundary_weight: float = 2.0
     loss_dynamic_weighting: bool = True
+
+    # Metrics
+    iou_class_weights: list[float] = field(default_factory=lambda: [1.0, 0.2, 1.0])
     
     # TTA 推理
     use_tta: bool = True
@@ -76,6 +79,12 @@ class ModelConfig:
             raise ValueError("max_epochs must be >= 1")
         if self.learning_rate <= 0:
             raise ValueError("learning_rate must be > 0")
+        if len(self.iou_class_weights) != self.num_classes:
+            raise ValueError("iou_class_weights length must match num_classes")
+        if any(weight < 0 for weight in self.iou_class_weights):
+            raise ValueError("iou_class_weights must be non-negative")
+        if sum(self.iou_class_weights) <= 0:
+            raise ValueError("iou_class_weights must contain at least one positive weight")
         if self.test_image_log_max_samples < 0:
             raise ValueError("test_image_log_max_samples must be >= 0")
 

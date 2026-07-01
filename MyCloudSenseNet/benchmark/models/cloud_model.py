@@ -124,7 +124,9 @@ class CloudModel(pl.LightningModule):
         
         # cache outputs
         self.validation_step_outputs = []
+        self.validation_class_stats = []
         self.test_step_outputs = []
+        self.test_class_stats = []
         self._test_images_logged = 0
     
     def _get_loss_kwargs(self) -> Dict[str, Any]:
@@ -272,7 +274,7 @@ class CloudModel(pl.LightningModule):
         self,
         batch: Dict[str, Any],
         stage: str,
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """Run a labeled evaluation step for validation or test."""
         if "label" not in batch:
             raise ValueError(f"{stage} evaluation requires y paths/labels in the dataset.")
@@ -284,21 +286,44 @@ class CloudModel(pl.LightningModule):
             logits = self.forward(x)
             preds = torch.argmax(logits, dim=1)
             iou = intersection_over_union(preds, y)
+            intersections, unions = self._per_class_intersection_union(preds, y)
         
         self.log(f"{stage}/iou", iou, on_step=False, on_epoch=True, prog_bar=True)
-        return iou, x, y, preds
+        return iou, x, y, preds, intersections, unions
+
+    def _per_class_intersection_union(
+        self,
+        preds: torch.Tensor,
+        targets: torch.Tensor,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Return per-class intersection and union, ignoring invalid label 255."""
+        valid_mask = targets.ne(255)
+        preds = preds.masked_select(valid_mask)
+        targets = targets.masked_select(valid_mask)
+
+        intersections = []
+        unions = []
+        for cls in range(self.num_classes):
+            pred_cls = preds.eq(cls)
+            target_cls = targets.eq(cls)
+            intersections.append((pred_cls & target_cls).sum())
+            unions.append((pred_cls | target_cls).sum())
+
+        return torch.stack(intersections), torch.stack(unions)
 
     def validation_step(self, batch: Dict[str, Any], batch_idx: int):
         """验证步骤"""
-        iou, _, _, _ = self._eval_step(batch, "val")
+        iou, _, _, _, intersections, unions = self._eval_step(batch, "val")
         self.validation_step_outputs.append(iou)
+        self.validation_class_stats.append((intersections, unions))
         return iou
 
     def test_step(self, batch: Dict[str, Any], batch_idx: int):
         """测试步骤"""
-        iou, x, y, preds = self._eval_step(batch, "test")
+        iou, x, y, preds, intersections, unions = self._eval_step(batch, "test")
         self._log_test_images(batch, x, y, preds)
         self.test_step_outputs.append(iou)
+        self.test_class_stats.append((intersections, unions))
         return iou
 
     def on_test_start(self):
@@ -389,14 +414,46 @@ class CloudModel(pl.LightningModule):
         if self.validation_step_outputs:
             avg_iou = torch.stack(self.validation_step_outputs).mean()
             self.log("val/avg_iou", avg_iou, prog_bar=True)
+        self._log_epoch_class_ious("val", self.validation_class_stats)
         self.validation_step_outputs.clear()
+        self.validation_class_stats.clear()
 
     def on_test_epoch_end(self):
         """测试 epoch 结束"""
         if self.test_step_outputs:
             avg_iou = torch.stack(self.test_step_outputs).mean()
             self.log("test/avg_iou", avg_iou, prog_bar=True)
+        self._log_epoch_class_ious("test", self.test_class_stats)
         self.test_step_outputs.clear()
+        self.test_class_stats.clear()
+
+    def _log_epoch_class_ious(
+        self,
+        stage: str,
+        class_stats: list[Tuple[torch.Tensor, torch.Tensor]],
+    ) -> None:
+        """Log exact epoch-level per-class IoU from accumulated intersections/unions."""
+        if not class_stats:
+            return
+
+        intersections = torch.stack([stats[0] for stats in class_stats]).sum(dim=0).float()
+        unions = torch.stack([stats[1] for stats in class_stats]).sum(dim=0).float()
+        class_ious = (intersections + 1e-6) / (unions + 1e-6)
+        class_ious = torch.clamp(class_ious, max=1.0)
+
+        for cls, class_iou in enumerate(class_ious):
+            self.log(f"{stage}/iou_class_{cls}", class_iou, prog_bar=False)
+
+        weights = torch.tensor(
+            self.config.iou_class_weights,
+            dtype=class_ious.dtype,
+            device=class_ious.device,
+        )
+        active_mask = unions.gt(0) & weights.gt(0)
+        if active_mask.any():
+            active_weights = weights[active_mask]
+            weighted_iou = (class_ious[active_mask] * active_weights).sum() / active_weights.sum()
+            self.log(f"{stage}/weighted_iou", weighted_iou, prog_bar=True)
     
     def configure_optimizers(self):
         """配置优化器和调度器"""
