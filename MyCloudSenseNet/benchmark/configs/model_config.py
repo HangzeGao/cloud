@@ -16,15 +16,15 @@ class ModelConfig:
     """
     
     # 模型架构
-    model_name: str = "fpn"  # unet, segformer, deeplabv3+, fpn
-    backbone: str = "mit_b3" # mit_b0 ~ mit_b5 / resnet34, resnet50 / timm-efficientnet-b0 ~ timm-efficientnet-b7
+    model_name: str = "segformer"  # unet, segformer, deeplabv3+, fpn
+    backbone: str = "mit_b2" # mit_b0 ~ mit_b5 / resnet34, resnet50 / timm-efficientnet-b0 ~ timm-efficientnet-b7
     encoder_weights: str = "imagenet"
     bands: list[str] = field(default_factory=lambda: ["B02", "B03", "B04"])
     num_classes: int = 3
     
     # 训练参数
     learning_rate: float = 1e-3
-    batch_size: int = 16
+    batch_size: int = 32
     max_epochs: int = 100
     num_workers: int = 16
     
