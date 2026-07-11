@@ -9,7 +9,7 @@ import pytorch_lightning as pl
 import torch
 
 from ..configs import ModelConfig
-from .dataset import CloudDataset, load_normalization_stats
+from .dataset import CloudDataset
 
 try:
     import albumentations as A
@@ -83,7 +83,6 @@ class CloudDataModule(pl.LightningDataModule):
         self.train_dataset = None
         self.val_dataset = None
         self.test_dataset = None
-        self.normalization_stats = load_normalization_stats(config.normalization_stats_path)
 
     def setup(self, stage: Optional[str] = None) -> None:
         if self.x_train is not None and self.y_train is not None:
@@ -93,7 +92,6 @@ class CloudDataModule(pl.LightningDataModule):
                 y_paths=self.y_train,
                 bit_depth_classes=self.config.bit_depth_classes,
                 transforms=create_train_transforms(),
-                normalization_stats=self.normalization_stats,
             )
 
         if self.x_val is not None and self.y_val is not None:
@@ -103,7 +101,6 @@ class CloudDataModule(pl.LightningDataModule):
                 y_paths=self.y_val,
                 bit_depth_classes=self.config.bit_depth_classes,
                 transforms=create_val_transforms(),
-                normalization_stats=self.normalization_stats,
             )
 
         if self.x_test is not None:
@@ -113,7 +110,6 @@ class CloudDataModule(pl.LightningDataModule):
                 y_paths=self.y_test,
                 bit_depth_classes=self.config.bit_depth_classes,
                 transforms=None,
-                normalization_stats=self.normalization_stats,
             )
 
     def train_dataloader(self):

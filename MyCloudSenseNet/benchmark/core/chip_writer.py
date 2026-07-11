@@ -62,9 +62,9 @@ class ChipWriter:
                 paths[f"{band}_path"] = str(path.resolve())
 
         label_path = label_out_dir / f"{chip_id}.tif"
-        if not label_path.exists():
-            with rasterio.open(label_path, "w", **meta) as dst:
-                dst.write(chip_label, 1)
+        label_meta = {**meta, "dtype": "uint8", "nodata": 255}
+        with rasterio.open(label_path, "w", **label_meta) as dst:
+            dst.write(chip_label.astype(np.uint8), 1)
         paths["label_path"] = str(label_path.resolve())
 
         return paths

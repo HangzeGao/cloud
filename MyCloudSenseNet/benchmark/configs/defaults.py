@@ -25,8 +25,9 @@ except ImportError:
 # Data Configuration
 # ---------------------------------------------------------------------------
 
-# Default spectral bands to use (Sentinel-2: B02=Blue, B03=Green, B04=Red, B08=NIR)
-BANDS: Final[list[str]] = ["B02", "B03", "B04", "B08"]
+# Canonical model inputs: Blue, Green, Red. NIR is intentionally excluded so
+# training matches deployment scenes where it may not be available.
+BANDS: Final[list[str]] = ["B02", "B03", "B04"]
 
 # Image chip size for tiling (pixels)
 CHIP_SIZE: Final[int] = 512

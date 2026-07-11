@@ -96,6 +96,7 @@ class GeoTIFFTiler:
 
         row = {
             "chip_id": window.chip_id,
+            "sensor": getattr(self.df_row, "sensor", "GF1"),
             "x_start": window.x_start,
             "x_end": window.x_end,
             "y_start": window.y_start,
@@ -103,6 +104,9 @@ class GeoTIFFTiler:
             **label_class_stats(chip_label),
             **paths,
         }
+        for band, stats in (self.info.normalization_stats or {}).items():
+            row[f"{band}_p2"] = stats["p2"]
+            row[f"{band}_p98"] = stats["p98"]
 
         if hasattr(self.df_row, "location"):
             row["location"] = self.df_row.location

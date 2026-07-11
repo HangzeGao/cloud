@@ -6,6 +6,7 @@ reading from directories and CSV files.
 """
 
 from pathlib import Path
+import re
 from typing import Iterable, List, Mapping, Sequence, Set
 
 import pandas as pd
@@ -267,6 +268,12 @@ def build_dataset_metadata(
     if allow_multiband:
         for image_path in image_files:
             if image_path in used_paths:
+                continue
+            # A non-selected spectral band (for example B08 in a BGR-only
+            # run) is not an independent multiband chip. Without this guard
+            # it would be assigned chip_id ``<chip>/B08`` and the label lookup
+            # would incorrectly fail on ``labels/<dataset>/<chip>/B08.tif``.
+            if re.fullmatch(r"B\d{2,3}", image_path.stem, flags=re.IGNORECASE):
                 continue
             image_rel = image_path.relative_to(image_root)
             chip_id = image_rel.with_suffix("").as_posix()

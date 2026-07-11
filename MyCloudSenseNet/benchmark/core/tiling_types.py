@@ -54,5 +54,6 @@ class ImageInfo:
     crs: Any
     height: int
     width: int
+    normalization_stats: Optional[Dict[str, Dict[str, float]]] = None
     windows: Optional[List[ChipWindow]] = None
     metadata: Optional[pd.DataFrame] = None

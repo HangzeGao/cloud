@@ -13,13 +13,9 @@ from ..configs.defaults import LabelRanges, NUM_CLASSES, STRETCH_PERCENTILE, THU
 def mask2label(mask: np.ndarray) -> np.ndarray:
     """Convert raw mask values to class labels."""
     label = np.zeros_like(mask, dtype=np.uint8)
-    label[
-        (mask >= LabelRanges.BACKGROUND[0]) & (mask <= LabelRanges.BACKGROUND[1])
-    ] = 0
-    label[
-        (mask >= LabelRanges.SHADOW[0]) & (mask <= LabelRanges.SHADOW[1])
-    ] = 1
-    label[(mask >= LabelRanges.CLOUD[0]) & (mask <= LabelRanges.CLOUD[1])] = 2
+    label[(mask >= LabelRanges.BACKGROUND[0]) & (mask <= LabelRanges.BACKGROUND[1])] = 0
+    label[(mask >= LabelRanges.SHADOW[0]) & (mask <= LabelRanges.SHADOW[1])] = 0
+    label[(mask >= LabelRanges.CLOUD[0]) & (mask <= LabelRanges.CLOUD[1])] = 1
     return label
 
 

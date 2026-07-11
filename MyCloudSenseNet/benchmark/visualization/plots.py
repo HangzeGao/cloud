@@ -12,7 +12,7 @@ import rasterio
 from matplotlib import pyplot as plt
 
 from ..configs.defaults import logger
-from ..core.raster_utils import create_rgb_composite, display_thumbnail
+from ..core.raster_utils import create_rgb_composite, display_thumbnail, mask2label
 from ..evaluation import intersection_over_union, read_prediction_and_aligned_true
 
 
@@ -37,10 +37,21 @@ def display_thumbnail_with_prediction(
     # Read dataset thumbnail
     with rasterio.open(data_path) as src:
         thumbnail = display_thumbnail(src, max_size)
+        # The GF1 source label is the fifth band. Read it separately with
+        # nearest-neighbour resampling, then map its raw encoding to binary.
+        # ``display_thumbnail`` uses bilinear interpolation for imagery and
+        # must not be used directly for discrete mask values.
+        mask = None
+        if src.count >= 5:
+            mask_raw = src.read(
+                5,
+                out_shape=(thumbnail.shape[-2], thumbnail.shape[-1]),
+                resampling=rasterio.enums.Resampling.nearest,
+            )
+            mask = mask2label(mask_raw)
 
     # Extract bands
-    b, g, r, nir = thumbnail[:4]
-    mask = thumbnail[4] if thumbnail.shape[0] > 4 else None
+    b, g, r = thumbnail[:3]
 
     # Create RGB
     rgb = create_rgb_composite(np.stack([b, g, r]))
@@ -223,7 +234,14 @@ def plot_prediction_comparison_grid(
             thumbnail = display_thumbnail(src, max_size)
             b, g, r = thumbnail[:3]
             rgb = create_rgb_composite(np.stack([r, g, b]))
-            mask = thumbnail[3] if thumbnail.shape[0] > 3 else None
+            mask = None
+            if src.count >= 5:
+                mask_raw = src.read(
+                    5,
+                    out_shape=(thumbnail.shape[-2], thumbnail.shape[-1]),
+                    resampling=rasterio.enums.Resampling.nearest,
+                )
+                mask = mask2label(mask_raw)
 
         # RGB
         axes[row, col].imshow(rgb)

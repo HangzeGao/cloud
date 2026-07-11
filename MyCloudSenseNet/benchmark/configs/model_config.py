@@ -21,7 +21,6 @@ class ModelConfig:
     encoder_weights: str = "imagenet"
     bands: list[str] = field(default_factory=lambda: ["B02", "B03", "B04"])
     num_classes: int = 2
-    normalization_stats_path: str | None = None
     
     # 训练参数
     learning_rate: float = 1e-3

@@ -33,8 +33,19 @@ class GeoTIFFReader:
             raise FileNotFoundError(f"File not found: {self.file_path}")
 
         with rasterio.open(self.file_path) as src:
-            data = src.read((1, 2, 3, 4))
+            # GF1-style source TIFFs contain B/G/R/NIR/label. Keep only B/G/R
+            # for the common deployment-compatible model input.
+            data = src.read((1, 2, 3))
             mask = src.read(5)
+            normalization_stats = {}
+            for index, band in enumerate(("B02", "B03", "B04")):
+                values = data[index].ravel()
+                step = max(1, values.size // 200_000)
+                sample = values[::step]
+                normalization_stats[band] = {
+                    "p2": float(np.percentile(sample, 2)),
+                    "p98": float(np.percentile(sample, 98)),
+                }
 
             self.info = ImageInfo(
                 data=data,
@@ -45,6 +56,7 @@ class GeoTIFFReader:
                 crs=src.crs,
                 height=src.height,
                 width=src.width,
+                normalization_stats=normalization_stats,
             )
 
             if display_thumbnail_preview:
@@ -56,7 +68,7 @@ class GeoTIFFReader:
         from matplotlib import pyplot as plt
 
         thumbnail = display_thumbnail(src)
-        b, g, r, _ = thumbnail[:4]
+        b, g, r = thumbnail[:3]
         mask = thumbnail[4] if thumbnail.shape[0] > 4 else None
         rgb = create_rgb_composite(np.stack([b, g, r]))
 
