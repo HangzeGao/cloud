@@ -1,8 +1,18 @@
-from typing import Optional, List
+from typing import Optional, List, Mapping
+import json
+from pathlib import Path
 import numpy as np
 import pandas as pd
 import rasterio
 import torch
+
+
+def load_normalization_stats(path: Optional[str | Path]) -> dict:
+    """Load sensor/band percentile statistics from a JSON file."""
+    if not path:
+        return {}
+    with Path(path).open("r", encoding="utf-8") as handle:
+        return json.load(handle)
 
 
 def normalize_by_minmax(data, max_pixel=1):
@@ -109,7 +119,10 @@ class CloudDataset(torch.utils.data.Dataset):
         bands: List[str],
         y_paths: Optional[pd.DataFrame] = None,
         bit_depth: Optional[int] = None,
+        bit_depth_classes: Optional[List[int]] = None,
         transforms: Optional = None,
+        normalization_stats: Optional[Mapping] = None,
+        sensor_column: str = "sensor",
     ):
         """
         Instantiate the CloudDataset class.
@@ -118,7 +131,10 @@ class CloudDataset(torch.utils.data.Dataset):
         self.bands = bands
         self.label = y_paths
         self.bit_depth = bit_depth
+        self.bit_depth_classes = tuple(bit_depth_classes or [8, 10, 12, 14, 16])
         self.transforms = transforms
+        self.normalization_stats = normalization_stats or {}
+        self.sensor_column = sensor_column
 
     def __len__(self):
         return len(self.data)
@@ -127,11 +143,18 @@ class CloudDataset(torch.utils.data.Dataset):
         # Loads an n-channel image from a chip-level dataframe
         img = self.data.loc[idx]
         band_arrs = []
+        band_bit_depths = []
         for band in self.bands:
             with rasterio.open(img[f"{band}_path"]) as b:
                 band_arr = b.read(1).astype("float32")
-                band_arr = normalize_by_bit_depth(band_arr, self.bit_depth)
-                # band_arr = normalize_by_minmax(band_arr)
+                band_bit_depth = self._get_band_bit_depth(img, band, band_arr)
+                band_bit_depths.append(band_bit_depth)
+                stats = self._get_percentile_stats(self._get_sensor(img), band)
+                if stats is None:
+                    band_arr = normalize_by_bit_depth(band_arr, band_bit_depth)
+                else:
+                    lo, hi = stats
+                    band_arr = np.clip((band_arr - lo) / max(hi - lo, 1e-6), 0.0, 1.0)
             band_arrs.append(band_arr)
         x_arr = np.stack(band_arrs, axis=-1)
 
@@ -152,8 +175,55 @@ class CloudDataset(torch.utils.data.Dataset):
         if isinstance(x_arr, np.ndarray):
             x_arr = np.transpose(x_arr, [2, 0, 1])
 
-        item = {"chip_id": str(img.chip_id), "chip": x_arr}
+        sample_bit_depth = self._nearest_supported_bit_depth(max(band_bit_depths))
+        item = {
+            "chip_id": str(img.chip_id),
+            "chip": x_arr,
+            "bit_depth": torch.tensor(sample_bit_depth, dtype=torch.long),
+        }
         if y_arr is not None:
             item["label"] = y_arr
 
         return item
+
+    def _get_band_bit_depth(self, row, band: str, band_arr: np.ndarray) -> int:
+        if self.bit_depth is not None:
+            return int(self.bit_depth)
+
+        for column in ("bit_depth", "input_bit_depth", f"{band}_bit_depth", f"{band}_depth"):
+            if column in row and pd.notna(row[column]):
+                return int(row[column])
+
+        return estimate_bit_depth_from_range(band_arr)
+
+    def _get_sensor(self, row) -> str:
+        for column in (self.sensor_column, "dataset"):
+            if column in row and pd.notna(row[column]):
+                return str(row[column])
+        # Existing metadata files may not have a sensor column. Infer the
+        # dataset directory from a path such as data/images/<sensor>/chip/...
+        for band in self.bands:
+            value = row.get(f"{band}_path") if hasattr(row, "get") else None
+            if value:
+                parts = Path(str(value)).parts
+                if "images" in parts:
+                    index = parts.index("images")
+                    if index + 1 < len(parts):
+                        return parts[index + 1]
+        return "default"
+
+    def _get_percentile_stats(self, sensor: str, band: str):
+        sensor_stats = self.normalization_stats.get(sensor)
+        if sensor_stats is None:
+            sensor_stats = self.normalization_stats.get("default")
+        if not isinstance(sensor_stats, Mapping):
+            return None
+        band_stats = sensor_stats.get(band)
+        if not isinstance(band_stats, Mapping):
+            return None
+        if "p2" not in band_stats or "p98" not in band_stats:
+            return None
+        return float(band_stats["p2"]), float(band_stats["p98"])
+
+    def _nearest_supported_bit_depth(self, bit_depth: int) -> int:
+        return min(self.bit_depth_classes, key=lambda candidate: abs(candidate - int(bit_depth)))

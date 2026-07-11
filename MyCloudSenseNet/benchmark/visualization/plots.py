@@ -78,14 +78,14 @@ def display_thumbnail_with_prediction(
         if len(axes) > 1 and mask is not None:
             axes[1].set_title(
                 f"True Mask\n"
-                f"shadow={true_cov[0]:.4f} | cloud={true_cov[1]:.4f}"
+                f"background={1.0 - true_cov[0]:.4f} | cloud={true_cov[0]:.4f}"
             )
 
         if len(axes) > 2:
             axes[2].imshow(pred_mask[0] if pred_mask.ndim == 3 else pred_mask)
             axes[2].set_title(
                 f"Predicted Mask (mIoU={mIoU:.4f})\n"
-                f"shadow={pred_cov[0]:.4f} | cloud={pred_cov[1]:.4f}"
+                f"background={1.0 - pred_cov[0]:.4f} | cloud={pred_cov[0]:.4f}"
             )
             axes[2].axis("off")
 

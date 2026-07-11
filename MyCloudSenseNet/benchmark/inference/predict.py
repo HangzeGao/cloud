@@ -149,9 +149,17 @@ def build_dataloader(
     Returns:
         DataLoader
     """
-    from ..dataset import CloudDataset
+    from ..dataset import CloudDataset, load_normalization_stats
+    from ..dataset.datamodule import create_val_transforms
 
-    dataset = CloudDataset(x_paths=x_paths.reset_index(drop=True), bands=model.config.bands)
+    dataset = CloudDataset(
+        x_paths=x_paths.reset_index(drop=True),
+        bands=model.config.bands,
+        transforms=create_val_transforms(),
+        normalization_stats=load_normalization_stats(
+            model.config.normalization_stats_path
+        ),
+    )
 
     return torch.utils.data.DataLoader(
         dataset,

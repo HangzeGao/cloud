@@ -20,12 +20,14 @@ class ModelConfig:
     backbone: str = "mit_b2" # mit_b0 ~ mit_b5 / resnet34, resnet50 / timm-efficientnet-b0 ~ timm-efficientnet-b7
     encoder_weights: str = "imagenet"
     bands: list[str] = field(default_factory=lambda: ["B02", "B03", "B04"])
-    num_classes: int = 3
+    num_classes: int = 2
+    normalization_stats_path: str | None = None
     
     # 训练参数
     learning_rate: float = 1e-3
-    batch_size: int = 32
+    batch_size: int = 24
     max_epochs: int = 100
+    patience: int = max_epochs // 5
     num_workers: int = 16
     
     # 优化器参数
@@ -41,6 +43,8 @@ class ModelConfig:
     bit_depth_enabled: bool = True
     bit_depth_estimator: str = "conv"  # minimal, conv, statistical
     bit_depth_adapter: str = "hard_gate"  # default, hard_gate, light
+    bit_depth_classes: list[int] = field(default_factory=lambda: [8, 10, 12, 14, 16])
+    bit_depth_loss_weight: float = 0.1
     
     # 损失函数
     loss_focal: bool = True
@@ -51,7 +55,7 @@ class ModelConfig:
     loss_dynamic_weighting: bool = True
 
     # Metrics
-    iou_class_weights: list[float] = field(default_factory=lambda: [1.0, 0.2, 1.0])
+    iou_class_weights: list[float] = field(default_factory=lambda: [1.0, 1.5])
     
     # TTA 推理
     use_tta: bool = True
@@ -87,6 +91,14 @@ class ModelConfig:
             raise ValueError("iou_class_weights must contain at least one positive weight")
         if self.test_image_log_max_samples < 0:
             raise ValueError("test_image_log_max_samples must be >= 0")
+        if not self.bit_depth_classes:
+            raise ValueError("bit_depth_classes must contain at least one value")
+        if len(set(self.bit_depth_classes)) != len(self.bit_depth_classes):
+            raise ValueError("bit_depth_classes must be unique")
+        if any(bit_depth <= 0 for bit_depth in self.bit_depth_classes):
+            raise ValueError("bit_depth_classes must contain positive values")
+        if self.bit_depth_loss_weight < 0:
+            raise ValueError("bit_depth_loss_weight must be >= 0")
 
     @property
     def in_channels(self) -> int:

@@ -12,19 +12,44 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
-MIN_BIT_DEPTH, MAX_BIT_DEPTH = 8, 12
+DEFAULT_BIT_DEPTHS = (8, 10, 12, 14, 16)
+MIN_BIT_DEPTH, MAX_BIT_DEPTH = min(DEFAULT_BIT_DEPTHS), max(DEFAULT_BIT_DEPTHS)
+STATISTICAL_FEATURES_PER_CHANNEL = 6
 
 
-def get_num_bit_depths():
-    return MAX_BIT_DEPTH - MIN_BIT_DEPTH + 1
+def normalize_bit_depth_values(bit_depths=None):
+    if bit_depths is None:
+        values = DEFAULT_BIT_DEPTHS
+    elif torch.is_tensor(bit_depths):
+        values = tuple(int(v) for v in bit_depths.detach().cpu().tolist())
+    else:
+        values = tuple(int(v) for v in bit_depths)
+    if not values:
+        raise ValueError("bit_depths must contain at least one value")
+    if len(set(values)) != len(values):
+        raise ValueError(f"bit_depths must be unique, got: {values}")
+    return values
+
+
+def bit_depths_to_indices(bit_depths, supported_bit_depths=None):
+    supported = torch.as_tensor(
+        normalize_bit_depth_values(supported_bit_depths),
+        device=bit_depths.device,
+        dtype=torch.float32,
+    )
+    values = bit_depths.to(dtype=torch.float32).view(-1, 1)
+    return torch.argmin(torch.abs(values - supported.view(1, -1)), dim=1)
 
 
 class MinimalEstimator(nn.Module):
     """极简统计估计器"""
     
-    def __init__(self, in_channels=4):
+    def __init__(self, in_channels, bit_depths=None):
         super().__init__()
-        self.register_buffer('min_bd', torch.tensor(float(MIN_BIT_DEPTH)))
+        bit_depth_values = normalize_bit_depth_values(bit_depths)
+        self.register_buffer('bit_depths', torch.tensor(bit_depth_values, dtype=torch.float32))
+        self.register_buffer('min_bd', torch.tensor(float(min(bit_depth_values))))
+        self.register_buffer('max_bd', torch.tensor(float(max(bit_depth_values))))
     
     @torch.no_grad()
     def forward(self, x):
@@ -36,12 +61,12 @@ class MinimalEstimator(nn.Module):
         # 启发式映射
         estimated = torch.clamp(
             self.min_bd + (dynamic_range - 0.8) * 20,
-            float(MIN_BIT_DEPTH), float(MAX_BIT_DEPTH)
+            float(self.min_bd), float(self.max_bd)
         )
         
         # 伪logits
-        logits = torch.zeros(B, get_num_bit_depths(), device=x.device)
-        idx = (estimated - float(MIN_BIT_DEPTH)).long().clamp(0, get_num_bit_depths() - 1)
+        logits = torch.zeros(B, self.bit_depths.numel(), device=x.device)
+        idx = bit_depths_to_indices(estimated, self.bit_depths)
         logits.scatter_(1, idx.unsqueeze(1), 1.0)
         
         return logits, estimated
@@ -50,8 +75,9 @@ class MinimalEstimator(nn.Module):
 class ConvEstimator(nn.Module):
     """轻量CNN估计器 (推荐)"""
     
-    def __init__(self, in_channels=4):
+    def __init__(self, in_channels, bit_depths=None):
         super().__init__()
+        bit_depth_values = normalize_bit_depth_values(bit_depths)
         self.encoder = nn.Sequential(
             nn.Conv2d(in_channels, 16, 3, stride=2, padding=1),
             nn.BatchNorm2d(16), nn.ReLU(inplace=True),
@@ -63,9 +89,9 @@ class ConvEstimator(nn.Module):
         self.classifier = nn.Sequential(
             nn.Flatten(),
             nn.Linear(64, 32), nn.ReLU(inplace=True),
-            nn.Linear(32, get_num_bit_depths()),
+            nn.Linear(32, len(bit_depth_values)),
         )
-        self.register_buffer('bit_depths', torch.arange(MIN_BIT_DEPTH, MAX_BIT_DEPTH + 1).float())
+        self.register_buffer('bit_depths', torch.tensor(bit_depth_values, dtype=torch.float32))
     
     def forward(self, x):
         features = self.encoder(x)
@@ -78,20 +104,21 @@ class ConvEstimator(nn.Module):
 class StatisticalEstimator(nn.Module):
     """统计特征MLP估计器"""
     
-    def __init__(self, in_channels=4, hidden=32):
+    def __init__(self, in_channels, hidden=32, bit_depths=None):
         super().__init__()
+        bit_depth_values = normalize_bit_depth_values(bit_depths)
         self.in_channels = in_channels
         self.mlp = nn.Sequential(
-            nn.Linear(in_channels * 10, hidden),
+            nn.Linear(in_channels * STATISTICAL_FEATURES_PER_CHANNEL, hidden),
             nn.ReLU(inplace=True), nn.Dropout(0.1),
-            nn.Linear(hidden, get_num_bit_depths()),
+            nn.Linear(hidden, len(bit_depth_values)),
         )
-        self.register_buffer('bit_depths', torch.arange(MIN_BIT_DEPTH, MAX_BIT_DEPTH + 1).float())
+        self.register_buffer('bit_depths', torch.tensor(bit_depth_values, dtype=torch.float32))
         self.register_buffer('hist_bins', torch.linspace(0, 1, 65))
     
     def extract_stats(self, x):
         B, C, H, W = x.shape
-        x_flat = x.view(B, C, -1)
+        x_flat = x.reshape(B, C, -1)
         
         stats = [
             x_flat.mean(dim=2),
@@ -115,7 +142,7 @@ class EstimatorFactory:
     """估计器工厂"""
     
     @staticmethod
-    def create(estimator_type: str, in_channels=4):
+    def create(estimator_type: str, in_channels, bit_depths=None):
         estimators = {
             "minimal": MinimalEstimator,
             "conv": ConvEstimator,
@@ -123,4 +150,4 @@ class EstimatorFactory:
         }
         if estimator_type not in estimators:
             raise ValueError(f"Unknown estimator: {estimator_type}")
-        return estimators[estimator_type](in_channels)
+        return estimators[estimator_type](in_channels, bit_depths=bit_depths)

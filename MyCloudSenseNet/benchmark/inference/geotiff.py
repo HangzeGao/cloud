@@ -15,7 +15,7 @@ import numpy as np
 from tqdm import tqdm
 
 from ..configs import ModelConfig
-from ..configs.defaults import DEFAULT_MODEL_WEIGHTS_PATH, NUM_CLASSES, logger
+from ..configs.defaults import NUM_CLASSES, logger
 from ..core.geotiff_tiler import GeoTIFFTiler
 from ..utils.utils import ensure_dir
 from .predict import crop, fuse, iter_predict, load_model, run, save_geotiff
@@ -24,7 +24,7 @@ from .predict import crop, fuse, iter_predict, load_model, run, save_geotiff
 def predict_full_geotiff(
     tiler: GeoTIFFTiler,
     pred_out_dir: Path,
-    model_weights_path: Path = DEFAULT_MODEL_WEIGHTS_PATH,
+    model_weights_path: Path,
     config: Optional[ModelConfig] = None,
     device: str = "auto",
     save_chip_masks: bool = False,
@@ -97,7 +97,7 @@ def predict_full_geotiff(
 def predict_geotiff_chips(
     tiler: GeoTIFFTiler,
     out_dir: Path,
-    model_weights_path: Path = DEFAULT_MODEL_WEIGHTS_PATH,
+    model_weights_path: Path,
     config: Optional[ModelConfig] = None,
     device: str = "auto",
     save_probs: bool = False,

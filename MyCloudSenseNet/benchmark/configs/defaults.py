@@ -34,25 +34,13 @@ CHIP_SIZE: Final[int] = 512
 # Overlap ratio for sliding window tiling (0.2 = 20% overlap)
 OVERLAP_RATIO: Final[float] = 0.2
 
-# Valid pixel threshold for training chips [min_ratio, max_ratio]
-# Chips with valid pixel percentage outside this range will be filtered out
-VALID_THRESHOLD: Final[list[float]] = [0.001, 0.999]
-
-# Default dataset directory (relative to current working directory)
-DATA_DIR: Final[Path] = Path.cwd().parent.resolve() / "dataset"
-
 # ---------------------------------------------------------------------------
 # Model Configuration
 # ---------------------------------------------------------------------------
 
-# Default model architecture name
-MODEL_NAME: Final[str] = "unet"
-
-# Default model weights path (relative to notebook directory)
-DEFAULT_MODEL_WEIGHTS_PATH: Final[Path] = Path("unet/assets/cloud_model.pt")
-
-# Number of output classes (background, shadow, cloud)
-NUM_CLASSES: Final[int] = 3
+# Number of output classes (background, cloud). Shadows are folded into
+# background during dataset preparation.
+NUM_CLASSES: Final[int] = 2
 
 # ---------------------------------------------------------------------------
 # Prediction Configuration

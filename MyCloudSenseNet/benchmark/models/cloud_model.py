@@ -19,6 +19,7 @@ import pytorch_lightning as pl
 import segmentation_models_pytorch as smp
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 from ..configs import ModelConfig
 from .losses import intersection_over_union
@@ -192,6 +193,7 @@ class CloudModel(pl.LightningModule):
             self.bit_depth_estimator = EstimatorFactory.create(
                 cfg.bit_depth_estimator,
                 in_channels=self.in_channels,
+                bit_depths=cfg.bit_depth_classes,
             )
             
             # 特征适配器（在编码器输出后应用）
@@ -199,6 +201,7 @@ class CloudModel(pl.LightningModule):
             self.feature_adapter = AdapterFactory.create(
                 cfg.bit_depth_adapter,
                 feature_dim=feature_dim,
+                num_bit_depths=len(cfg.bit_depth_classes),
             )
             
             # 包装编码器
@@ -233,7 +236,78 @@ class CloudModel(pl.LightningModule):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """前向传播"""
         return self.model(x)
-    
+
+    def _get_bit_depth_info(self) -> Dict[str, torch.Tensor] | None:
+        encoder = getattr(self.model, "encoder", None)
+        if not self.config.bit_depth_enabled or encoder is None:
+            return None
+        if not hasattr(encoder, "get_bit_depth_info"):
+            return None
+        return encoder.get_bit_depth_info()
+
+    def _bit_depth_targets(self, batch: Dict[str, Any]) -> torch.Tensor | None:
+        if "bit_depth" not in batch:
+            return None
+        from .bit_depth_estimators import bit_depths_to_indices
+
+        bit_depth = self._to_device(batch["bit_depth"].long()).view(-1)
+        return bit_depths_to_indices(bit_depth, self.config.bit_depth_classes)
+
+    def _add_bit_depth_loss(
+        self,
+        loss: torch.Tensor,
+        batch: Dict[str, Any],
+        stage: str,
+    ) -> torch.Tensor:
+        weight = self.config.bit_depth_loss_weight
+        if not self.config.bit_depth_enabled or weight == 0:
+            return loss
+
+        bit_depth_info = self._get_bit_depth_info()
+        targets = self._bit_depth_targets(batch)
+        if bit_depth_info is None or targets is None:
+            return loss
+
+        bit_depth_loss = F.cross_entropy(bit_depth_info["logits"], targets)
+        self.log(
+            f"{stage}/bit_depth_loss",
+            bit_depth_loss,
+            on_step=(stage == "train"),
+            on_epoch=True,
+            prog_bar=False,
+        )
+        return loss + weight * bit_depth_loss
+
+    def _log_bit_depth_metrics(self, batch: Dict[str, Any], stage: str) -> None:
+        bit_depth_info = self._get_bit_depth_info()
+        if bit_depth_info is None or "estimated" not in bit_depth_info:
+            return
+
+        self.log(
+            f"{stage}/est_bit_depth",
+            bit_depth_info["estimated"].mean(),
+            on_step=False,
+            on_epoch=True,
+        )
+        targets = self._bit_depth_targets(batch)
+        if "bit_depth" in batch:
+            true_bit_depth = self._to_device(batch["bit_depth"].float()).view(-1)
+            self.log(
+                f"{stage}/true_bit_depth",
+                true_bit_depth.mean(),
+                on_step=False,
+                on_epoch=True,
+            )
+        if targets is not None:
+            accuracy = bit_depth_info["logits"].argmax(dim=1).eq(targets).float().mean()
+            self.log(
+                f"{stage}/bit_depth_acc",
+                accuracy,
+                on_step=False,
+                on_epoch=True,
+                prog_bar=False,
+            )
+
     def training_step(self, batch: Dict[str, Any], batch_idx: int):
         """训练步骤"""
         x = self._to_device(batch["chip"])
@@ -255,18 +329,14 @@ class CloudModel(pl.LightningModule):
                 loss_info = {}
         
         # 记录损失
+        loss = self._add_bit_depth_loss(loss, batch, "train")
         self.log("train/loss", loss, on_step=True, on_epoch=True, prog_bar=True)
         for key, val in loss_info.items():
             if isinstance(val, (int, float)):
                 self.log(f"train/{key}", val, on_step=False, on_epoch=True)
         
         # 记录位深度信息
-        if self.config.bit_depth_enabled:
-            if hasattr(self.model.encoder, 'get_bit_depth_info'):
-                bd_info = self.model.encoder.get_bit_depth_info()
-                if bd_info and 'estimated' in bd_info:
-                    self.log("train/est_bit_depth", bd_info['estimated'].mean(), 
-                            on_step=False, on_epoch=True)
+        self._log_bit_depth_metrics(batch, "train")
         
         return loss
     
@@ -289,6 +359,7 @@ class CloudModel(pl.LightningModule):
             intersections, unions = self._per_class_intersection_union(preds, y)
         
         self.log(f"{stage}/iou", iou, on_step=False, on_epoch=True, prog_bar=True)
+        self._log_bit_depth_metrics(batch, stage)
         return iou, x, y, preds, intersections, unions
 
     def _per_class_intersection_union(
