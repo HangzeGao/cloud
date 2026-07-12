@@ -24,7 +24,7 @@ class ModelConfig:
     
     # 训练参数
     learning_rate: float = 1e-3
-    batch_size: int = 24
+    batch_size: int = 25
     max_epochs: int = 100
     patience: int = max_epochs // 5
     num_workers: int = 16
